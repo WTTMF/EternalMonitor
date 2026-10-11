@@ -187,11 +187,18 @@ fn decode(codec: Id, packets: &[&NALUnit]) -> Vec<(u32, u32, u64)> {
         .unwrap();
     let mut frame = ffmpeg_next::frame::Video::empty();
     let mut pictures = Vec::new();
-    let mut receive = |decoder: &mut ffmpeg_next::decoder::Video| {
-        while decoder.receive_frame(&mut frame).is_ok() {
-            let counter =
-                decode_frame_counter_from_luma(frame.data(0), frame.stride(0), frame.width());
-            pictures.push((frame.width(), frame.height(), counter));
+    let mut receive = |decoder: &mut ffmpeg_next::decoder::Video| loop {
+        match decoder.receive_frame(&mut frame) {
+            Ok(()) => {
+                let counter =
+                    decode_frame_counter_from_luma(frame.data(0), frame.stride(0), frame.width());
+                pictures.push((frame.width(), frame.height(), counter));
+            }
+            Err(ffmpeg_next::Error::Eof) => break,
+            Err(ffmpeg_next::Error::Other { errno }) if errno == ffmpeg_next::error::EAGAIN => {
+                break;
+            }
+            Err(error) => panic!("decoder rejected an access unit: {error}"),
         }
     };
     for packet in packets {
@@ -202,6 +209,7 @@ fn decode(codec: Id, packets: &[&NALUnit]) -> Vec<(u32, u32, u64)> {
     }
     decoder.send_eof().unwrap();
     receive(&mut decoder);
+    assert_eq!(pictures.len(), packets.len(), "decoder lost pictures");
     pictures
 }
 
@@ -231,6 +239,7 @@ fn assert_hevc_keyframe(packet: &NALUnit, what: &str) {
 /// picture is at most `KEYFRAME_WINDOW` frames past the request, and a decoder
 /// that joins there must decode everything after it.
 fn assert_keyframe_on_request(run: &StageRun, codec: Id) {
+    decode(codec, &run.packets.iter().collect::<Vec<_>>());
     let keyframes: Vec<u64> = run
         .packets
         .iter()
@@ -279,22 +288,24 @@ fn mode_changes(number: u64) -> (u32, u32) {
 
 /// After each mode change the stream must restart on a keyframe at the new
 /// size that a fresh decoder can join.
-fn assert_follows_mode_changes(run: &StageRun) {
+fn assert_follows_mode_changes(run: &StageRun, codec: Id) {
+    decode(codec, &run.packets.iter().collect::<Vec<_>>());
     for (from, size) in [(30u64, LARGE), (60, SMALL)] {
         let start = run
             .packets
             .iter()
             .position(|packet| packet.sequence >= from)
             .unwrap_or_else(|| panic!("no packets after the mode change at frame {from}"));
-        assert_h264_keyframe(
-            &run.packets[start],
-            &format!("the first packet after the mode change at frame {from}"),
-        );
+        let what = format!("the first packet after the mode change at frame {from}");
+        match codec {
+            Id::H264 => assert_h264_keyframe(&run.packets[start], &what),
+            _ => assert_hevc_keyframe(&run.packets[start], &what),
+        }
         let segment: Vec<&NALUnit> = run.packets[start..]
             .iter()
             .take_while(|packet| packet.sequence < from + 30)
             .collect();
-        let pictures = decode(Id::H264, &segment);
+        let pictures = decode(codec, &segment);
         assert!(!pictures.is_empty(), "nothing decoded after frame {from}");
         for (width, height, counter) in pictures {
             assert_eq!(
@@ -310,7 +321,7 @@ fn assert_follows_mode_changes(run: &StageRun) {
 fn software_encoder_follows_capture_mode_changes() {
     let _guard = STAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let run = run_stage("libx264", mode_changes, None);
-    assert_follows_mode_changes(&run);
+    assert_follows_mode_changes(&run, Id::H264);
 }
 
 #[test]
@@ -319,6 +330,31 @@ fn software_encoder_honours_keyframe_requests() {
     let run = run_stage("libx264", |_| LARGE, Some(KEYFRAME_REQUEST_AT));
     assert_h264_keyframe(&run.packets[0], "the first packet");
     assert_keyframe_on_request(&run, Id::H264);
+}
+
+#[test]
+fn strict_decoder_rejects_broken_access_units() {
+    let _guard = STAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let run = run_stage("libx264", |_| SMALL, None);
+    let predicted = run
+        .packets
+        .iter()
+        .position(|packet| !packet.is_keyframe)
+        .expect("the stream has no predicted frames");
+    let tail: Vec<&NALUnit> = run.packets[predicted..].iter().collect();
+    assert!(
+        std::panic::catch_unwind(|| decode(Id::H264, &tail)).is_err(),
+        "a decoder joining without a keyframe accepted the stream"
+    );
+
+    let mut broken = run.packets[predicted].clone();
+    broken.data = vec![0, 0, 0, 1, 0x65, 0xff];
+    let mut packets: Vec<&NALUnit> = run.packets.iter().collect();
+    packets[predicted] = &broken;
+    assert!(
+        std::panic::catch_unwind(|| decode(Id::H264, &packets)).is_err(),
+        "a decoder accepted a corrupt slice"
+    );
 }
 
 #[test]
@@ -376,7 +412,18 @@ fn amf_follows_capture_mode_changes() {
     let _guard = STAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let run = run_stage("h264_amf", mode_changes, None);
     assert!(!run.software_fallback, "AMF fell back to libx264");
-    assert_follows_mode_changes(&run);
+    assert_follows_mode_changes(&run, Id::H264);
+}
+
+#[test]
+fn amf_hevc_follows_capture_mode_changes() {
+    if !amf_available("hevc_amf") {
+        return;
+    }
+    let _guard = STAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let run = run_stage("hevc_amf", mode_changes, None);
+    assert!(!run.software_fallback, "AMF fell back to libx264");
+    assert_follows_mode_changes(&run, Id::HEVC);
 }
 
 #[test]

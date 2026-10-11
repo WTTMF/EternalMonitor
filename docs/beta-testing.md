@@ -226,6 +226,15 @@ keyframe in the middle of a GOP, change the capture size mid-stream, and
 decode every packet with FFmpeg. CI runs the same file with `fallback`. That
 proves a PC without an AMD driver drops to libx264 instead of failing.
 
+With `ETERNAL_AMF_TEST` unset, machines whose FFmpeg has no AMF skip the
+hardware cases. Use `hardware` for AMD sign-off and retain the GPU model,
+AMD driver version, Windows build and FFmpeg version with the test output.
+These synthetic-frame tests exercise the encoder. Run the existing
+`R-amf-h264` and `R-amf-hevc` reference-PC rows for desktop capture and iPad
+decoding, and check reconnects on an idle desktop over both Wi-Fi and USB.
+Also resize the captured display up and down during a stream, then test
+lock/unlock and display sleep/wake for capture recovery on that driver.
+
 An amber software-fallback banner means a hardware encoder failed to open.
 Capture that error before changing drivers or settings. A fallback that produces
 video is not proof that the requested hardware encoder worked.

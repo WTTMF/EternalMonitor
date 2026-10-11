@@ -132,6 +132,7 @@ fn run_encode_loop(
     let mut hevc_unavailable_warned = false;
     let mut hevc_open_failed = false;
     let mut last_keyframe_reopen: Option<Instant> = None;
+    let mut pending_keyframe = false;
 
     // Guarantee the very first frame of every pipeline is an IDR for all encoders, so the
     // iPad never sits in `waitingForSyncSample` after a connect or pipeline restart.
@@ -211,7 +212,10 @@ fn run_encode_loop(
         let size_changed = encoder_state
             .as_ref()
             .is_some_and(|state| !state.accepts_frame(raw_frame.width, raw_frame.height));
-        let keyframe_reopen = shared.force_next_idr.load(Ordering::SeqCst)
+        // Latch requests before deciding whether to reopen. Requests received
+        // during the rate limit must survive until AMF can emit an IDR.
+        pending_keyframe |= shared.force_next_idr.swap(false, Ordering::SeqCst);
+        let keyframe_reopen = pending_keyframe
             && encoder_state.as_ref().is_some_and(|state| {
                 reopen_for_keyframe(
                     &state.opened_encoder,
@@ -313,7 +317,7 @@ fn run_encode_loop(
                     );
                     encoder_state = Some(state);
                     failed_reopen = None;
-                    shared.force_next_idr.store(true, Ordering::SeqCst);
+                    pending_keyframe = true;
                     note_encoder_opened(&shared, &desired_encoder);
                 }
                 // The old session cannot take a frame of the new size. A
@@ -403,8 +407,12 @@ fn run_encode_loop(
             pts
         };
         encoder.frame.set_pts(Some(pts));
-        let force_idr = shared.force_next_idr.swap(false, Ordering::SeqCst)
-            || test_idr_period.is_some_and(|period| raw_frame.frame_number.is_multiple_of(period));
+        let force_idr = take_keyframe_request(
+            &mut pending_keyframe,
+            &encoder.opened_encoder,
+            encoder.frames_submitted,
+        ) || test_idr_period
+            .is_some_and(|period| raw_frame.frame_number.is_multiple_of(period));
         let _forced_intra = prepare_frame_for_encode(
             &mut encoder.frame,
             raw_frame.frame_number,
@@ -769,6 +777,15 @@ fn reopen_for_keyframe(
         && since_last_reopen.is_none_or(|elapsed| {
             elapsed >= crate::transport::session::KEYFRAME_REQUEST_MIN_INTERVAL
         })
+}
+
+/// AMF can satisfy a request only on a fresh session's first frame. Keep it
+/// pending while a reopen is rate limited or has failed.
+fn take_keyframe_request(pending: &mut bool, encoder_name: &str, frames_submitted: u64) -> bool {
+    if ignores_forced_keyframes(encoder_name) && frames_submitted > 0 {
+        return false;
+    }
+    std::mem::take(pending)
 }
 
 fn codec_display_name_for(encoder_name: &str) -> &str {
@@ -1454,6 +1471,37 @@ mod tests {
         for name in ["h264_nvenc", "hevc_nvenc", "h264_qsv", "libx264", "libx265"] {
             assert!(!reopen_for_keyframe(name, 300, None), "{name}");
         }
+    }
+
+    #[test]
+    fn amf_keeps_keyframe_requests_pending_until_a_fresh_session() {
+        for name in ["h264_amf", "hevc_amf"] {
+            let mut pending = true;
+            for millis in [0, 100, 499] {
+                assert!(!reopen_for_keyframe(
+                    name,
+                    10,
+                    Some(std::time::Duration::from_millis(millis))
+                ));
+                assert!(!take_keyframe_request(&mut pending, name, 10));
+                assert!(pending, "{name} lost the deferred request");
+            }
+            assert!(reopen_for_keyframe(
+                name,
+                10,
+                Some(std::time::Duration::from_millis(500))
+            ));
+            // A failed reopen leaves the old session in place.
+            assert!(!take_keyframe_request(&mut pending, name, 10));
+            assert!(pending);
+            // A successful reopen starts its frame counter at zero.
+            assert!(take_keyframe_request(&mut pending, name, 0));
+            assert!(!pending);
+            assert!(!take_keyframe_request(&mut pending, name, 0));
+        }
+        let mut pending = true;
+        assert!(take_keyframe_request(&mut pending, "libx264", 10));
+        assert!(!pending);
     }
 
     #[test]
