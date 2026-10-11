@@ -70,6 +70,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test workspace
+        env:
+          # The runner has no AMD driver, so AMF must fail to open and the
+          # encode stage must fall back to libx264 (host/tests/amf_encoder.rs).
+          ETERNAL_AMF_TEST: fallback
         run: cargo test --workspace --locked
 
       - name: Test virtual display task scripts

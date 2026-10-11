@@ -22,9 +22,10 @@ pub struct SharedControl {
     pub encoder_input: Arc<Mutex<crate::encoder::input::EncoderInput>>,
     pub max_dgram: Arc<AtomicU32>,
     pub target_addr: Arc<Mutex<PeerId>>,
-    /// Set by transport on iPad re-handshake (same target). Encoder
-    /// swaps it back to false on the next frame and forces an IDR. AMD only — NVENC
-    /// ignores it because NVENC keyframe cadence is already correct.
+    /// Set when the client needs a keyframe: a new session, a keyframe request
+    /// or frames dropped on a USB link. The encoder clears it on the next
+    /// frame and forces an IDR, reopening AMF sessions because AMF ignores
+    /// per-frame keyframe requests (see `encoder::ignores_forced_keyframes`).
     pub force_next_idr: Arc<AtomicBool>,
     /// Encoder name override from the Settings tab, applied on next pipeline restart.
     /// `None` means use auto-detected encoder from GpuInfo.

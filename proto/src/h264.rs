@@ -88,6 +88,15 @@ pub struct AuInfo {
     pub intra_only: bool,
 }
 
+impl AuInfo {
+    /// Whether the access unit goes out flagged as a keyframe. AMF's
+    /// all-intra access units without an IDR NAL count too: they carry
+    /// SPS/PPS after normalization and the iPad starts decoding on them.
+    pub fn is_keyframe(&self, packet_is_key: bool, encoder_name: &str) -> bool {
+        packet_is_key || self.contains_idr || (is_amf_encoder(encoder_name) && self.intra_only)
+    }
+}
+
 /// Rewrites one encoded packet into clean Annex B, injecting cached SPS/PPS
 /// according to the per-encoder rules the iPad decoder depends on.
 pub fn normalize_h264_payload(
@@ -794,6 +803,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn amf_intra_access_units_go_out_as_keyframes() {
+        let extradata = [
+            1, 66, 0, 30, 0xFF, 0xE1, 0x00, 0x04, 0x67, 0x42, 0x00, 0x1E, 0x01, 0x00, 0x02, 0x68,
+            0xCE,
+        ];
+        let intra = [0, 0, 0, 1, 0x41, 0xB8];
+        let inter = [0, 0, 0, 1, 0x41, 0xE0];
+        let idr = [0, 0, 0, 1, 0x65, 0x88, 0x84];
+        let keyframe = |payload: &[u8], packet_is_key: bool, encoder: &str| {
+            let mut state = H264BitstreamState::default();
+            state.refresh_parameter_sets_from_extradata(Some(extradata.to_vec()));
+            state.packet_count = 90;
+            let (_, info) =
+                normalize_h264_payload_with_info(payload, packet_is_key, &mut state, encoder);
+            info.is_keyframe(packet_is_key, encoder)
+        };
+
+        assert!(keyframe(&intra, false, "h264_amf"));
+        assert!(!keyframe(&inter, false, "h264_amf"));
+        assert!(keyframe(&idr, false, "h264_amf"));
+        // Other encoders keep the strict IDR rule, and packet flags still count.
+        assert!(!keyframe(&intra, false, "h264_nvenc"));
+        assert!(keyframe(&idr, false, "h264_nvenc"));
+        assert!(keyframe(&inter, true, "libx264"));
+        // HEVC goes through its own path, so the H.264 AMF rules stop at h264_amf.
+        assert!(!is_amf_encoder("hevc_amf"));
     }
 
     #[test]
