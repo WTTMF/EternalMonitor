@@ -213,6 +213,19 @@ option needs both color comparison and ten-minute NVENC/AMF runs before its
 baseline can change. AMF normalization, startup-IDR retries and forced-intra
 handling remain in place.
 
+On a PC with an AMD GPU, run the AMF encoder tests from a source checkout
+before signing off an AMD build:
+
+```powershell
+$env:ETERNAL_AMF_TEST = "hardware"
+cargo test -p eternal-host --locked --test amf_encoder
+```
+
+They open `h264_amf` and `hevc_amf` on the installed driver, request a
+keyframe in the middle of a GOP, change the capture size mid-stream, and
+decode every packet with FFmpeg. CI runs the same file with `fallback`. That
+proves a PC without an AMD driver drops to libx264 instead of failing.
+
 An amber software-fallback banner means a hardware encoder failed to open.
 Capture that error before changing drivers or settings. A fallback that produces
 video is not proof that the requested hardware encoder worked.

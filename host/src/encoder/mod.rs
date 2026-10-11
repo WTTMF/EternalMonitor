@@ -131,6 +131,7 @@ fn run_encode_loop(
     // session changes (hevc_wanted going false resets it).
     let mut hevc_unavailable_warned = false;
     let mut hevc_open_failed = false;
+    let mut last_keyframe_reopen: Option<Instant> = None;
 
     // Guarantee the very first frame of every pipeline is an IDR for all encoders, so the
     // iPad never sits in `waitingForSyncSample` after a connect or pipeline restart.
@@ -204,6 +205,21 @@ fn run_encode_loop(
             }
         }
 
+        // Capture rebuilds at the new size after a display mode change (Radeon
+        // Super Resolution, VSR, GPU scaling, a resized virtual display). The
+        // open session's frame buffers no longer fit.
+        let size_changed = encoder_state
+            .as_ref()
+            .is_some_and(|state| !state.accepts_frame(raw_frame.width, raw_frame.height));
+        let keyframe_reopen = shared.force_next_idr.load(Ordering::SeqCst)
+            && encoder_state.as_ref().is_some_and(|state| {
+                reopen_for_keyframe(
+                    &state.opened_encoder,
+                    state.frames_submitted,
+                    last_keyframe_reopen.map(|at| at.elapsed()),
+                )
+            });
+
         if encoder_state.is_none() {
             match EncoderState::new(
                 &desired_encoder,
@@ -255,16 +271,23 @@ fn run_encode_loop(
                 }
                 Err(e) => return Err(e),
             }
-        } else if encoder_state.as_ref().is_some_and(|state| {
-            state.opened_encoder != desired_encoder
-                || ((state.opened_bitrate != desired_bitrate || state.opened_fps != target_fps)
-                    && failed_reopen != Some((desired_bitrate, target_fps)))
-        }) {
-            // Bitrate changed (ABR rung or the user's slider) or the
-            // negotiated codec changed (HEVC toggle / client capability):
-            // hardware encoders ignore parameter pokes on an open context, so
-            // either means a session reopen (~50-200ms hiccup, no transport
-            // teardown, same stream epoch) followed by a forced IDR.
+        } else if size_changed
+            || keyframe_reopen
+            || encoder_state.as_ref().is_some_and(|state| {
+                state.opened_encoder != desired_encoder
+                    || ((state.opened_bitrate != desired_bitrate || state.opened_fps != target_fps)
+                        && failed_reopen != Some((desired_bitrate, target_fps)))
+            })
+        {
+            // Bitrate changed (ABR rung or the user's slider), the
+            // negotiated codec changed (HEVC toggle / client capability), the
+            // capture size changed (display mode change), or AMF owes a
+            // keyframe: hardware encoders ignore parameter pokes on an open
+            // context, so each means a session reopen (~50-200ms hiccup, no
+            // transport teardown, same stream epoch) followed by a forced IDR.
+            if keyframe_reopen {
+                last_keyframe_reopen = Some(Instant::now());
+            }
             let previous = encoder_state
                 .as_ref()
                 .map(|s| s.opened_bitrate)
@@ -282,12 +305,26 @@ fn run_encode_loop(
                         from = previous,
                         to = desired_bitrate,
                         encoder = %desired_encoder,
+                        width = raw_frame.width,
+                        height = raw_frame.height,
+                        size_changed,
+                        keyframe = keyframe_reopen,
                         "Reopened encoder session"
                     );
                     encoder_state = Some(state);
                     failed_reopen = None;
                     shared.force_next_idr.store(true, Ordering::SeqCst);
                     note_encoder_opened(&shared, &desired_encoder);
+                }
+                // The old session cannot take a frame of the new size. A
+                // pipeline restart opens a fresh encoder, with the software
+                // fallback if the hardware one rejects this size.
+                Err(e) if size_changed => {
+                    return Err(format!(
+                        "{desired_encoder} could not reopen at {}x{}: {e}",
+                        raw_frame.width, raw_frame.height
+                    )
+                    .into());
                 }
                 Err(e) if is_hevc_encoder(&desired_encoder) => {
                     warn!(
@@ -378,6 +415,7 @@ fn run_encode_loop(
 
         let encode_start = Instant::now();
         encoder.encoder.send_frame(&encoder.frame)?;
+        encoder.frames_submitted += 1;
 
         loop {
             match encoder.encoder.receive_packet(&mut encoder.packet) {
@@ -419,9 +457,8 @@ fn run_encode_loop(
                             &mut encoder.h264,
                             &encoder.opened_encoder,
                         );
-                        let is_keyframe = packet_is_key
-                            || au_info.contains_idr
-                            || (is_amf_encoder(&encoder.opened_encoder) && au_info.intra_only);
+                        let is_keyframe =
+                            au_info.is_keyframe(packet_is_key, &encoder.opened_encoder);
                         (nal_data, is_keyframe)
                     };
                     if !opened_is_hevc {
@@ -510,6 +547,8 @@ struct EncoderState {
     /// Last applied bitrate. Hardware encoders reopen when this changes.
     opened_bitrate: u32,
     opened_fps: u32,
+    /// Frames sent to this session. Its first frame is always an IDR.
+    frames_submitted: u64,
     /// First frame's capture instant — the PTS epoch for this session.
     pts_epoch: Option<std::time::Instant>,
     last_pts: i64,
@@ -668,10 +707,15 @@ impl EncoderState {
             opened_encoder: encoder_name.to_string(),
             opened_bitrate: bitrate_bps,
             opened_fps: target_fps,
+            frames_submitted: 0,
             pts_epoch: None,
             last_pts: -1,
             legacy_pts,
         })
+    }
+
+    fn accepts_frame(&self, width: u32, height: u32) -> bool {
+        self.frame.width() == width && self.frame.height() == height
     }
 
     fn observe_amf_diagnostics(
@@ -701,6 +745,30 @@ pub fn hevc_variant_of(h264_name: &str) -> Option<&'static str> {
 
 pub fn is_hevc_encoder(encoder_name: &str) -> bool {
     encoder_name.starts_with("hevc_") || encoder_name == "libx265"
+}
+
+/// True for encoders that cannot be asked for a keyframe on a given frame.
+/// FFmpeg 7.1's AMF wrapper never reads `AVFrame::pict_type` (8.0 added that,
+/// behind its `forced_idr` option), so AMF keeps encoding P-frames until its
+/// own IDR period. Every new session starts with an IDR carrying its
+/// parameter sets, so the encode loop reopens AMF to honour a request.
+pub fn ignores_forced_keyframes(encoder_name: &str) -> bool {
+    matches!(encoder_name, "h264_amf" | "hevc_amf")
+}
+
+/// Whether a pending keyframe request needs a session reopen: the encoder
+/// ignores per-frame requests, the session has already sent its opening IDR,
+/// and the last such reopen is older than the client's own request limit.
+fn reopen_for_keyframe(
+    encoder_name: &str,
+    frames_submitted: u64,
+    since_last_reopen: Option<std::time::Duration>,
+) -> bool {
+    ignores_forced_keyframes(encoder_name)
+        && frames_submitted > 0
+        && since_last_reopen.is_none_or(|elapsed| {
+            elapsed >= crate::transport::session::KEYFRAME_REQUEST_MIN_INTERVAL
+        })
 }
 
 fn codec_display_name_for(encoder_name: &str) -> &str {
@@ -1369,6 +1437,48 @@ mod tests {
         );
         assert_eq!(hevc_variant_of("libx264"), Some("libx265"));
         assert_eq!(hevc_variant_of("mystery_codec"), None);
+    }
+
+    #[test]
+    fn amf_keyframe_requests_reopen_the_session_at_most_twice_a_second() {
+        let long_ago = Some(std::time::Duration::from_secs(5));
+        let just_now = Some(std::time::Duration::from_millis(100));
+        for name in ["h264_amf", "hevc_amf"] {
+            assert!(reopen_for_keyframe(name, 1, None), "{name}");
+            assert!(reopen_for_keyframe(name, 300, long_ago), "{name}");
+            // A fresh session's first frame is already an IDR.
+            assert!(!reopen_for_keyframe(name, 0, None), "{name}");
+            assert!(!reopen_for_keyframe(name, 300, just_now), "{name}");
+        }
+        // These encoders turn AVFrame::pict_type into a keyframe themselves.
+        for name in ["h264_nvenc", "hevc_nvenc", "h264_qsv", "libx264", "libx265"] {
+            assert!(!reopen_for_keyframe(name, 300, None), "{name}");
+        }
+    }
+
+    #[test]
+    fn amf_options_keep_the_settings_the_ipad_decoder_needs() {
+        let h264 = encoder_options("h264_amf");
+        for (key, value) in [
+            ("usage", "lowlatency"),
+            ("profile", "constrained_baseline"),
+            ("level", "5.1"),
+            ("coder", "cavlc"),
+            ("aud", "0"),
+            ("header_spacing", "1"),
+            ("rc", "cbr"),
+        ] {
+            assert_eq!(h264.get(key), Some(value), "h264_amf {key}");
+        }
+        let hevc = encoder_options("hevc_amf");
+        for (key, value) in [
+            ("usage", "lowlatency"),
+            ("aud", "0"),
+            ("header_insertion_mode", "idr"),
+            ("rc", "cbr"),
+        ] {
+            assert_eq!(hevc.get(key), Some(value), "hevc_amf {key}");
+        }
     }
 
     #[test]
