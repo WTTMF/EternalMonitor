@@ -4,6 +4,17 @@ Thanks for helping. Bug fixes, tests, docs and new ideas are all welcome. For
 anything bigger than a small fix, open an issue or message `aldobenches285` on
 Discord first, so we can agree on the approach before you write the code.
 
+## Fork the repository
+
+Anyone with a GitHub account can contribute. [Fork EternalMonitor](https://github.com/sidebandstudio/EternalMonitor/fork)
+to your own account, then clone your fork and create a topic branch from `main`.
+You do not need write access to Sideband's repository.
+
+Push your branch to your fork and open a pull request targeting
+`sidebandstudio/EternalMonitor:main`. Select **compare across forks** if your
+branch does not appear. Creating a branch directly in Sideband's repository
+requires write access; creating one in your fork does not.
+
 ## Set up
 
 Follow [Build from source](README.md#build-from-source). You can do most work
@@ -13,7 +24,7 @@ injection, the virtual display) needs a Windows PC to run for real.
 
 ## Make a change
 
-1. Branch from `main` and keep each pull request to one topic.
+1. Create a topic branch from `main` in your fork and keep each pull request to one topic.
 2. Match the code around you. Comments explain why, not what.
 3. Add or update tests with the change. Logic with timers takes an injected
    clock, as the existing tests do.
@@ -59,6 +70,15 @@ or screenshots of someone's desktop. The host log records the current pairing co
 Describe what changed and why, and how you tested it: the commands you ran and,
 for hardware changes, the GPU, Windows version and iPad model. Screenshots help for
 UI changes.
+
+## Maintainer review
+
+Pull requests into `main` require an approving review from
+[Ali Younes, @whoisaldo](https://github.com/whoisaldo), the current maintainer
+and code owner. New commits dismiss earlier approvals. The rule also applies
+to other administrators. Only Ali has a review bypass, so he can merge his own
+changes while he is the sole maintainer. All changes to `main` must still go
+through a pull request.
 
 By contributing, you agree that your work is released under the
 [MIT License](LICENSE).
