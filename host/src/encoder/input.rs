@@ -26,17 +26,41 @@ pub(super) fn select_input(
     mode: EncoderInput,
     codec_name: &str,
     supported: &[Pixel],
-) -> Result<Pixel, &'static str> {
-    if mode == EncoderInput::Yuv420 || codec_name == "libx264" {
+) -> Result<Pixel, String> {
+    if codec_name == "libx264" {
         return Ok(Pixel::YUV420P);
     }
-    for format in [Pixel::BGRA, Pixel::BGRZ] {
-        if supported.contains(&format) {
-            return Ok(format);
+
+    let bgra_format = [Pixel::BGRA, Pixel::BGRZ]
+        .into_iter()
+        .find(|format| supported.contains(format));
+
+    if matches!(codec_name, "h264_qsv" | "hevc_qsv") {
+        if mode == EncoderInput::Bgra {
+            return bgra_format.ok_or_else(|| {
+                format!(
+                    "The selected QSV encoder does not accept BGRA/BGR0 input; supported formats: {supported:?}"
+                )
+            });
         }
+        return supported
+            .contains(&Pixel::NV12)
+            .then_some(Pixel::NV12)
+            .ok_or_else(|| {
+                format!(
+                    "The selected QSV encoder requires NV12 input; supported formats: {supported:?}"
+                )
+            });
+    }
+
+    if mode == EncoderInput::Yuv420 {
+        return Ok(Pixel::YUV420P);
+    }
+    if let Some(format) = bgra_format {
+        return Ok(format);
     }
     if mode == EncoderInput::Bgra {
-        Err("The selected encoder does not accept BGRA/BGR0 input")
+        Err("The selected encoder does not accept BGRA/BGR0 input".to_string())
     } else {
         Ok(Pixel::YUV420P)
     }
@@ -45,8 +69,37 @@ pub(super) fn select_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn advertised_formats_control_native_input_and_software_stays_yuv() {
+    fn qsv_uses_nv12_for_auto_and_default_yuv420() {
+        let formats = [Pixel::NV12, Pixel::QSV];
+        assert_eq!(
+            select_input(EncoderInput::Auto, "h264_qsv", &formats),
+            Ok(Pixel::NV12)
+        );
+        assert_eq!(
+            select_input(EncoderInput::Yuv420, "h264_qsv", &formats),
+            Ok(Pixel::NV12)
+        );
+        assert_eq!(
+            select_input(EncoderInput::Yuv420, "hevc_qsv", &formats),
+            Ok(Pixel::NV12)
+        );
+    }
+
+    #[test]
+    fn qsv_rejects_unsupported_inputs_with_format_details() {
+        let bgra_error = select_input(EncoderInput::Bgra, "h264_qsv", &[Pixel::NV12]).unwrap_err();
+        assert!(bgra_error.contains("BGRA/BGR0"));
+        assert!(bgra_error.contains("NV12"));
+
+        let nv12_error = select_input(EncoderInput::Auto, "hevc_qsv", &[Pixel::QSV]).unwrap_err();
+        assert!(nv12_error.contains("NV12"));
+        assert!(nv12_error.contains("QSV"));
+    }
+
+    #[test]
+    fn nvenc_amf_and_software_selection_is_unchanged() {
         let formats = [Pixel::YUV420P, Pixel::BGRZ, Pixel::BGRA];
         assert_eq!(
             select_input(EncoderInput::Auto, "h264_nvenc", &formats),
@@ -55,10 +108,6 @@ mod tests {
         assert_eq!(
             select_input(EncoderInput::Auto, "h264_amf", &[Pixel::BGRZ]),
             Ok(Pixel::BGRZ)
-        );
-        assert_eq!(
-            select_input(EncoderInput::Auto, "h264_qsv", &[Pixel::NV12]),
-            Ok(Pixel::YUV420P)
         );
         assert_eq!(
             select_input(EncoderInput::Auto, "unknown", &[]),

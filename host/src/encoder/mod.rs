@@ -355,6 +355,7 @@ fn run_encode_loop(
         let current_bitrate = encoder.opened_bitrate;
         let opened_is_hevc = is_hevc_encoder(&encoder.opened_encoder);
 
+        #[cfg(target_os = "macos")]
         let src_row_bytes = (raw_frame.width * 4) as usize;
         #[cfg(target_os = "macos")]
         let converted = match encoder.native_converter.as_ref().map(|converter| {
@@ -378,14 +379,12 @@ fn run_encode_loop(
         let converted = false;
         if !converted {
             let input_frame = encoder.bgra_frame.as_mut().unwrap_or(&mut encoder.frame);
-            let stride = input_frame.stride(0);
-            let bgra_plane = input_frame.data_mut(0);
-            for y in 0..raw_frame.height as usize {
-                let src_offset = y * src_row_bytes;
-                let dst_offset = y * stride;
-                bgra_plane[dst_offset..dst_offset + src_row_bytes]
-                    .copy_from_slice(&raw_frame.data[src_offset..src_offset + src_row_bytes]);
-            }
+            copy_bgra_rows(
+                &raw_frame.data,
+                raw_frame.width,
+                raw_frame.height,
+                input_frame,
+            );
             if let (Some(scaler), Some(bgra)) = (&mut encoder.scaler, &encoder.bgra_frame) {
                 scaler.run(bgra, &mut encoder.frame)?;
             }
@@ -538,6 +537,51 @@ fn run_encode_loop(
     Ok(())
 }
 
+fn needs_color_conversion(pixel_format: ffmpeg_next::format::Pixel) -> bool {
+    matches!(
+        pixel_format,
+        ffmpeg_next::format::Pixel::YUV420P | ffmpeg_next::format::Pixel::NV12
+    )
+}
+
+fn create_color_scaler(
+    pixel_format: ffmpeg_next::format::Pixel,
+    width: u32,
+    height: u32,
+) -> Result<Option<ffmpeg_next::software::scaling::Context>, ffmpeg_next::Error> {
+    if !needs_color_conversion(pixel_format) {
+        return Ok(None);
+    }
+    ffmpeg_next::software::scaling::Context::get(
+        ffmpeg_next::format::Pixel::BGRA,
+        width,
+        height,
+        pixel_format,
+        width,
+        height,
+        // 1:1 scale — the "filter" only converts colorspace, so take the fast path.
+        ffmpeg_next::software::scaling::Flags::FAST_BILINEAR,
+    )
+    .map(Some)
+}
+
+fn copy_bgra_rows(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    destination: &mut ffmpeg_next::frame::Video,
+) {
+    let row_bytes = (width * 4) as usize;
+    let stride = destination.stride(0);
+    let plane = destination.data_mut(0);
+    for y in 0..height as usize {
+        let src_offset = y * row_bytes;
+        let dst_offset = y * stride;
+        plane[dst_offset..dst_offset + row_bytes]
+            .copy_from_slice(&source[src_offset..src_offset + row_bytes]);
+    }
+}
+
 struct EncoderState {
     #[cfg(target_os = "macos")]
     native_converter: Option<vimage::Converter>,
@@ -613,7 +657,8 @@ impl EncoderState {
         let codec = ffmpeg_next::encoder::find_by_name(encoder_name)
             .ok_or_else(|| format!("{} codec not found in FFmpeg", encoder_name))?;
         // AVCodec owns this terminated static list. A null list means that
-        // native BGRA support is unknown, so Auto retains the YUV path.
+        // native BGRA support is unknown, so generic Auto retains the YUV path;
+        // QSV requires an explicit NV12 capability before it is selected.
         let supported = unsafe {
             let mut ptr = (*codec.as_ptr()).pix_fmts;
             let mut formats = Vec::new();
@@ -668,22 +713,9 @@ impl EncoderState {
         let mut h264 = H264BitstreamState::default();
         h264.refresh_parameter_sets_from_extradata(encoder_extradata(&encoder));
 
-        let scaler = if pixel_format == ffmpeg_next::format::Pixel::YUV420P {
-            Some(ffmpeg_next::software::scaling::Context::get(
-                ffmpeg_next::format::Pixel::BGRA,
-                width,
-                height,
-                ffmpeg_next::format::Pixel::YUV420P,
-                width,
-                height,
-                // 1:1 scale — the "filter" only converts colorspace, so take the fast path.
-                ffmpeg_next::software::scaling::Flags::FAST_BILINEAR,
-            )?)
-        } else {
-            None
-        };
+        let scaler = create_color_scaler(pixel_format, width, height)?;
         if scaler.is_some() {
-            info!("swscale BGRA->YUV420P context created");
+            info!(output = ?pixel_format, "swscale BGRA conversion context created");
         }
 
         Ok(Self {
@@ -704,7 +736,7 @@ impl EncoderState {
             },
             encoder,
             scaler,
-            bgra_frame: (pixel_format == ffmpeg_next::format::Pixel::YUV420P).then(|| {
+            bgra_frame: needs_color_conversion(pixel_format).then(|| {
                 ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::BGRA, width, height)
             }),
             frame: ffmpeg_next::frame::Video::new(pixel_format, width, height),
@@ -1367,6 +1399,96 @@ fn find_ffmpeg_exe() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn visible_plane(
+        frame: &ffmpeg_next::frame::Video,
+        plane: usize,
+        columns: usize,
+        rows: usize,
+    ) -> Vec<u8> {
+        let stride = frame.stride(plane);
+        let data = frame.data(plane);
+        let mut visible = Vec::with_capacity(columns * rows);
+        for row in 0..rows {
+            let start = row * stride;
+            visible.extend_from_slice(&data[start..start + columns]);
+        }
+        visible
+    }
+
+    #[test]
+    fn swscale_converts_repeated_bgra_frames_to_nv12_and_reinitializes() {
+        ffmpeg_next::init().unwrap();
+        let (width, height) = (642, 362);
+        let mut scaler = create_color_scaler(ffmpeg_next::format::Pixel::NV12, width, height)
+            .unwrap()
+            .unwrap();
+        let mut input =
+            ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::BGRA, width, height);
+        let mut output =
+            ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::NV12, width, height);
+
+        let mut black = vec![0; (width * height * 4) as usize];
+        for pixel in black.as_chunks_mut::<4>().0 {
+            pixel[3] = 255;
+        }
+        let black_before = black.clone();
+        copy_bgra_rows(&black, width, height, &mut input);
+        scaler.run(&input, &mut output).unwrap();
+        assert_eq!(black, black_before);
+        assert_eq!(output.format(), ffmpeg_next::format::Pixel::NV12);
+        assert_eq!((output.width(), output.height()), (width, height));
+        assert!(output.stride(0) >= width as usize);
+        assert!(output.stride(1) >= width as usize);
+        let black_y = visible_plane(&output, 0, width as usize, height as usize);
+        let black_uv = visible_plane(&output, 1, width as usize, height as usize / 2);
+        assert_eq!(black_y.len(), (width * height) as usize);
+        assert_eq!(black_uv.len(), (width * height / 2) as usize);
+
+        let white = vec![255; (width * height * 4) as usize];
+        copy_bgra_rows(&white, width, height, &mut input);
+        scaler.run(&input, &mut output).unwrap();
+        let white_y = visible_plane(&output, 0, width as usize, height as usize);
+        assert_ne!(black_y, white_y);
+
+        let mut rebuilt_scaler =
+            create_color_scaler(ffmpeg_next::format::Pixel::NV12, width, height)
+                .unwrap()
+                .unwrap();
+        let mut rebuilt_input =
+            ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::BGRA, width, height);
+        let mut rebuilt_output =
+            ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::NV12, width, height);
+        copy_bgra_rows(&white, width, height, &mut rebuilt_input);
+        rebuilt_scaler
+            .run(&rebuilt_input, &mut rebuilt_output)
+            .unwrap();
+        assert_eq!(
+            white_y,
+            visible_plane(&rebuilt_output, 0, width as usize, height as usize)
+        );
+        assert_eq!(
+            visible_plane(&output, 1, width as usize, height as usize / 2),
+            visible_plane(&rebuilt_output, 1, width as usize, height as usize / 2)
+        );
+    }
+
+    #[test]
+    fn scaler_is_only_allocated_for_converted_encoder_inputs() {
+        ffmpeg_next::init().unwrap();
+        for direct in [
+            ffmpeg_next::format::Pixel::BGRA,
+            ffmpeg_next::format::Pixel::BGRZ,
+        ] {
+            assert!(create_color_scaler(direct, 16, 16).unwrap().is_none());
+        }
+        for converted in [
+            ffmpeg_next::format::Pixel::YUV420P,
+            ffmpeg_next::format::Pixel::NV12,
+        ] {
+            assert!(create_color_scaler(converted, 16, 16).unwrap().is_some());
+        }
+    }
 
     #[test]
     fn software_bitrate_changes_preserve_decoding_and_reduce_packet_size() {
