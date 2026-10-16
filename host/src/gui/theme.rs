@@ -153,6 +153,33 @@ fn fonts() -> FontDefinitions {
             .insert(name.into(), Arc::new(FontData::from_static(bytes)));
     }
 
+    // Windows 10/11 ships Microsoft YaHei. Load it as a fallback instead of
+    // redistributing the copyrighted font with the application.
+    #[cfg(windows)]
+    let cjk_face = std::env::var_os("WINDIR")
+        .and_then(|windows| {
+            std::fs::read(std::path::PathBuf::from(windows).join("Fonts/msyh.ttc")).ok()
+        })
+        .map(|bytes| {
+            let name = "system-cjk".to_string();
+            fonts
+                .font_data
+                .insert(name.clone(), Arc::new(FontData::from_owned(bytes)));
+            name
+        });
+    #[cfg(target_os = "macos")]
+    let cjk_face = std::fs::read("/System/Library/Fonts/PingFang.ttc")
+        .ok()
+        .map(|bytes| {
+            let name = "system-cjk".to_string();
+            fonts
+                .font_data
+                .insert(name.clone(), Arc::new(FontData::from_owned(bytes)));
+            name
+        });
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let cjk_face: Option<String> = None;
+
     // Keep egui's bundled faces behind Geist so device names in other
     // scripts, symbols and emoji still render.
     let fallback_sans = fonts
@@ -167,6 +194,7 @@ fn fonts() -> FontDefinitions {
         .unwrap_or_default();
     let with_fallback = |face: &str, fallback: &[String]| {
         std::iter::once(face.to_string())
+            .chain(cjk_face.iter().cloned())
             .chain(fallback.iter().cloned())
             .collect::<Vec<_>>()
     };

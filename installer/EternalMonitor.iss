@@ -52,9 +52,28 @@ SetupLogging=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "chinesesimplified"; MessagesFile: "languages\ChineseSimplified.isl"
+
+[CustomMessages]
+english.DesktopShortcut=Create a desktop shortcut
+chinesesimplified.DesktopShortcut=创建桌面快捷方式
+english.Shortcuts=Shortcuts:
+chinesesimplified.Shortcuts=快捷方式：
+english.Quickstart=Quickstart (read me)
+chinesesimplified.Quickstart=快速入门（自述文件）
+english.UninstallApp=Uninstall EternalMonitor
+chinesesimplified.UninstallApp=卸载 EternalMonitor
+english.LaunchNow=Launch EternalMonitor now
+chinesesimplified.LaunchNow=立即启动 EternalMonitor
+english.FirewallStatus=Allowing display traffic through Windows Firewall...
+chinesesimplified.FirewallStatus=正在允许 EternalMonitor 通过 Windows 防火墙…
+english.DriverStatus=Installing the virtual display driver (this enables the extended screen)...
+chinesesimplified.DriverStatus=正在安装虚拟显示驱动（用于启用扩展屏幕）…
+english.DisplayTaskStatus=Configuring the on-demand virtual display...
+chinesesimplified.DisplayTaskStatus=正在配置按需启用的虚拟显示器…
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
+Name: "desktopicon"; Description: "{cm:DesktopShortcut}"; GroupDescription: "{cm:Shortcuts}"
 ; Autostart is handled inside the app (Settings -> "Start with Windows",
 ; which writes HKCU\Run for the signed-in user) — no installer task needed.
 
@@ -79,26 +98,26 @@ Source: "scripts\vdd-toggle.ps1";       DestDir: "{app}\scripts"; Flags: ignorev
 
 [Icons]
 Name: "{group}\EternalMonitor";            Filename: "{app}\EternalMonitor-host.exe"
-Name: "{group}\Quickstart (read me)";      Filename: "{app}\QUICKSTART.txt"
-Name: "{group}\Uninstall EternalMonitor";  Filename: "{uninstallexe}"
+Name: "{group}\{cm:Quickstart}";            Filename: "{app}\QUICKSTART.txt"
+Name: "{group}\{cm:UninstallApp}";          Filename: "{uninstallexe}"
 Name: "{autodesktop}\EternalMonitor";      Filename: "{app}\EternalMonitor-host.exe"; Tasks: desktopicon
 
 [Run]
 ; Replace only this product's named rules so upgrades remain idempotent.
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""EternalMonitor Host UDP"""; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""EternalMonitor Host TCP"""; Flags: runhidden waituntilterminated
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""EternalMonitor Host UDP"" dir=in action=allow program=""{app}\EternalMonitor-host.exe"" protocol=UDP profile=private,public enable=yes"; StatusMsg: "Allowing display traffic through Windows Firewall..."; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""EternalMonitor Host UDP"" dir=in action=allow program=""{app}\EternalMonitor-host.exe"" protocol=UDP profile=private,public enable=yes"; StatusMsg: "{cm:FirewallStatus}"; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""EternalMonitor Host TCP"" dir=in action=allow program=""{app}\EternalMonitor-host.exe"" protocol=TCP profile=private,public enable=yes"; Flags: runhidden waituntilterminated
 #ifdef IncludeDriver
 ; The vendor setup prompts to uninstall an existing installation even with silent
 ; switches. Preserve an existing driver and install only when it is absent.
-Filename: "{app}\driver\vdd-setup-x64.exe"; Parameters: "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"; StatusMsg: "Installing the virtual display driver (this enables the extended screen)..."; Flags: waituntilterminated; Check: NeedsVddInstall; AfterInstall: RecordVddOwnership
+Filename: "{app}\driver\vdd-setup-x64.exe"; Parameters: "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"; StatusMsg: "{cm:DriverStatus}"; Flags: waituntilterminated; Check: NeedsVddInstall; AfterInstall: RecordVddOwnership
 ; Register the enable/disable scheduled tasks and leave the virtual display OFF by default —
 ; EternalMonitor turns it on only while streaming to it, so there's no phantom monitor.
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\vdd-tasks-setup.ps1"""; StatusMsg: "Configuring the on-demand virtual display..."; Flags: runhidden waituntilterminated; Check: VddInstallSucceeded; AfterInstall: VerifyVddDriver
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\vdd-tasks-setup.ps1"""; StatusMsg: "{cm:DisplayTaskStatus}"; Flags: runhidden waituntilterminated; Check: VddInstallSucceeded; AfterInstall: VerifyVddDriver
 #endif
 ; Launch the app at the end.
-Filename: "{app}\EternalMonitor-host.exe"; Description: "Launch EternalMonitor now"; Flags: nowait postinstall skipifsilent; Check: VddInstallSucceeded
+Filename: "{app}\EternalMonitor-host.exe"; Description: "{cm:LaunchNow}"; Flags: nowait postinstall skipifsilent; Check: VddInstallSucceeded
 
 [UninstallRun]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""EternalMonitor Host UDP"""; Flags: runhidden waituntilterminated; RunOnceId: "EternalMonitorFirewallUDP"

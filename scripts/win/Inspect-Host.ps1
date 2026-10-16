@@ -30,7 +30,6 @@ do {
 } while ($true)
 $handle = [IntPtr]$window.Current.NativeWindowHandle
 if ($window.Current.ProcessId -ne $p.Id -or $handle -eq [IntPtr]::Zero) { throw 'Unexpected GUI process' }
-# The Rust process can own a console as well as its actual GUI window.
 # Raise only the named GUI belonging to the verified tracked process.
 if (![EMHostWindow]::SetWindowPos($handle,[IntPtr](-1),30,10,1100,1000,0x40)) { throw 'Could not raise the tracked host' }
 [void][EMHostWindow]::SetForegroundWindow($handle)
@@ -52,28 +51,28 @@ function Invoke-HostControl([string]$Name) {
     elseif ($control.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern,[ref]$pattern)) { $pattern.Select() }
     else { throw "Host control cannot be invoked through UI Automation: $Name" }
 }
-Invoke-HostControl $(if ($View -eq 'Settings') { 'Settings' } else { 'Stream' })
-if ($View -eq 'QR') { Invoke-HostControl 'QR code' }
+Invoke-HostControl $(if ($View -eq 'Settings') { '设置' } else { '推流' })
+if ($View -eq 'QR') { Invoke-HostControl '二维码' }
 Start-Sleep -Milliseconds 300
 $nodes = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
 $names = @($nodes | ForEach-Object { $_.Current.Name } | Where-Object { $_ })
 if ($View -eq 'Stream') {
-    foreach ($label in @('Pairing','USB connection','PC audio')) {
+    foreach ($label in @('配对','USB 连接','电脑音频')) {
         if (!($names -contains $label)) { throw "Host Stream card absent: $label" }
     }
     if ($Connected) {
-        foreach ($label in @('Connected iPad','Decode rate','Repaired fragments')) {
+        foreach ($label in @('已连接的 iPad','解码帧率','已修复分片')) {
             if (!($names -contains $label)) { throw "Connected client evidence absent: $label" }
         }
-        if ($names -contains 'Waiting for an iPad') { throw 'Host GUI has no connected client' }
+        if ($names -contains '等待 iPad 连接') { throw 'Host GUI has no connected client' }
     }
 }
-if ($View -eq 'Settings' -and !($names -contains 'Encoder input')) { throw 'Settings content did not appear' }
-if ($View -eq 'QR' -and !($names -contains 'Scan to connect')) { throw 'QR modal did not appear' }
+if ($View -eq 'Settings' -and !($names -contains '编码器输入')) { throw 'Settings content did not appear' }
+if ($View -eq 'QR' -and !($names -contains '扫码连接')) { throw 'QR modal did not appear' }
 $autostart = $null
 if ($TestAutostart) {
     if ($View -ne 'Settings') { throw 'Autostart must be tested from Settings' }
-    $condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty,'Start on Windows startup')
+    $condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty,'随 Windows 启动')
     $checkbox = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$condition)
     $toggle = $null
     if (!$checkbox -or !$checkbox.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern,[ref]$toggle)) {
@@ -97,8 +96,8 @@ if ($TestAutostart) {
     try {
         Set-StartupFlag $false
         Set-StartupFlag $true
-        if ($key.GetValue('EternalMonitor') -ne ('"' + $p.Path + '"')) {
-            throw 'Startup command must contain the quoted, current host executable'
+        if ($key.GetValue('EternalMonitor') -ne ('"' + $p.Path + '" --background')) {
+            throw 'Startup command must contain the quoted host executable and background mode'
         }
         Set-StartupFlag $false
         $autostart = @{ enabled_path_verified=$true; disabled_value_absent=$true }

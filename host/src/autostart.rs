@@ -157,7 +157,11 @@ mod windows_impl {
         // and other paths with spaces remain a single executable argument.
         std::iter::once(u16::from(b'"'))
             .chain(value.encode_wide())
-            .chain([u16::from(b'"'), 0])
+            .chain(
+                OsStr::new("\" --background")
+                    .encode_wide()
+                    .chain(std::iter::once(0)),
+            )
             .flat_map(u16::to_le_bytes)
             .collect()
     }
@@ -199,9 +203,11 @@ mod windows_impl {
                 let args = unsafe { CommandLineToArgvW(PCWSTR(wide.as_ptr()), &mut count) };
                 assert!(!args.is_null());
                 let executable = unsafe { (*args).to_string() };
+                let mode = unsafe { (*args.add(1)).to_string() };
                 unsafe { LocalFree(HLOCAL(args.cast())) };
-                assert_eq!(count, 1, "startup command must contain only the executable");
+                assert_eq!(count, 2, "startup command must contain executable and mode");
                 assert_eq!(executable.unwrap(), path);
+                assert_eq!(mode.unwrap(), "--background");
             }
         }
 

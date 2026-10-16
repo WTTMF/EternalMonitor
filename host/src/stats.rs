@@ -19,6 +19,7 @@ pub struct PipelineStats {
     pub capture_fps: f64,
     pub capture_resolution: (u32, u32),
     pub capture_frame_count: u64,
+    pub capture_readback_time_us: u128,
     pub gpu_name: String,
     /// Active capture source, e.g. `\\.\DISPLAY3 (2732x2048)`. Empty until capture starts.
     pub capture_display: String,
@@ -27,6 +28,7 @@ pub struct PipelineStats {
     // Encoder
     pub encode_fps: f64,
     pub encode_time_us: u128,
+    pub color_conversion_time_us: u128,
     pub encode_frame_count: u64,
     pub nal_bytes_last: usize,
     pub bitrate_bps: u32,
@@ -61,6 +63,8 @@ pub struct PipelineStats {
 
     // Encode time history for chart
     pub encode_time_history: VecDeque<f64>,
+    pub capture_readback_history: VecDeque<f64>,
+    pub color_conversion_history: VecDeque<f64>,
 
     // Pipeline state
     pub pipeline_running: bool,
@@ -85,12 +89,14 @@ impl PipelineStats {
             capture_fps: 0.0,
             capture_resolution: (0, 0),
             capture_frame_count: 0,
+            capture_readback_time_us: 0,
             gpu_name: String::new(),
             capture_display: String::new(),
             capture_timestamps: VecDeque::with_capacity(128),
 
             encode_fps: 0.0,
             encode_time_us: 0,
+            color_conversion_time_us: 0,
             encode_frame_count: 0,
             nal_bytes_last: 0,
             bitrate_bps: 0,
@@ -118,6 +124,8 @@ impl PipelineStats {
             bandwidth_mbps: 0.0,
 
             encode_time_history: VecDeque::with_capacity(HISTORY_LEN),
+            capture_readback_history: VecDeque::with_capacity(HISTORY_LEN),
+            color_conversion_history: VecDeque::with_capacity(HISTORY_LEN),
 
             pipeline_running: false,
             start_time: None,
@@ -200,12 +208,21 @@ impl PipelineStats {
         self.using_software_fallback = using_software_fallback;
     }
 
-    pub fn record_capture(&mut self, width: u32, height: u32) {
+    pub fn record_capture(&mut self, width: u32, height: u32, readback_us: Option<u128>) {
         let now = Instant::now();
         self.capture_frame_count += 1;
         self.capture_resolution = (width, height);
         self.capture_timestamps.push_back(now);
         self.capture_fps = Self::calc_fps(&mut self.capture_timestamps, now);
+        if let Some(readback_us) = readback_us {
+            self.capture_readback_time_us = readback_us;
+            Self::push_timing(&mut self.capture_readback_history, readback_us);
+        }
+    }
+
+    pub fn record_color_conversion(&mut self, conversion_us: u128) {
+        self.color_conversion_time_us = conversion_us;
+        Self::push_timing(&mut self.color_conversion_history, conversion_us);
     }
 
     pub fn record_encode(&mut self, encode_us: u128, nal_bytes: usize, bitrate_bps: u32) {
@@ -280,6 +297,13 @@ impl PipelineStats {
             0.0
         }
     }
+
+    fn push_timing(history: &mut VecDeque<f64>, elapsed_us: u128) {
+        history.push_back(elapsed_us as f64 / 1000.0);
+        if history.len() > HISTORY_LEN {
+            history.pop_front();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -297,7 +321,9 @@ mod tests {
         stats.using_software_fallback = true;
         stats.mdns_active = true;
         stats.capture_frame_count = 10;
+        stats.capture_readback_history.push_back(2.1);
         stats.encode_frame_count = 8;
+        stats.color_conversion_history.push_back(1.4);
         stats.transport_packets_sent = 5;
         stats.encode_time_history.push_back(3.2);
 
@@ -311,8 +337,23 @@ mod tests {
         assert!(stats.using_software_fallback);
         assert!(stats.mdns_active);
         assert_eq!(stats.capture_frame_count, 0);
+        assert!(stats.capture_readback_history.is_empty());
         assert_eq!(stats.encode_frame_count, 0);
+        assert!(stats.color_conversion_history.is_empty());
         assert_eq!(stats.transport_packets_sent, 0);
         assert!(stats.encode_time_history.is_empty());
+    }
+
+    #[test]
+    fn stage_timings_are_recorded_without_idle_keepalives_erasing_readback() {
+        let mut stats = PipelineStats::new();
+        stats.record_capture(1920, 1080, Some(2_500));
+        stats.record_capture(1920, 1080, None);
+        stats.record_color_conversion(1_250);
+
+        assert_eq!(stats.capture_readback_time_us, 2_500);
+        assert_eq!(stats.capture_readback_history.back(), Some(&2.5));
+        assert_eq!(stats.color_conversion_time_us, 1_250);
+        assert_eq!(stats.color_conversion_history.back(), Some(&1.25));
     }
 }

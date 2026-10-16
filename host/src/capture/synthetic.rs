@@ -90,7 +90,7 @@ pub fn run_capture_loop(
         frame_number += 1;
         let data = render_next_frame(&mut buffers, width, height, frame_number);
 
-        PIPELINE_STATS.lock().record_capture(width, height);
+        PIPELINE_STATS.lock().record_capture(width, height, None);
         heartbeat(&shared.hb_capture_frame_ms);
 
         slot.publish(RawFrame {

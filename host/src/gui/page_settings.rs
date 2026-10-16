@@ -10,21 +10,22 @@ use crate::encoder::input::EncoderInput;
 
 impl AnalyzerApp {
     pub(super) fn settings_page(&mut self, ui: &mut Ui, snap: &StatsSnapshot) {
-        page_header(ui, "Settings", "Changes save automatically.", |_| {});
+        page_header(ui, "设置", "更改会自动保存。", |_| {});
         self.restart_notice(ui);
 
         // ── Display ─────────────────────────────────────────────────────────
-        widgets::section_label(ui, "Display");
+        widgets::section_label(ui, "显示");
         widgets::list_card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             let mut refresh = false;
             widgets::setting_row(
                 ui,
-                "Display to stream",
-                "Mirror a monitor, or extend Windows onto the iPad with a virtual display that exists only while streaming.",
+                "推流显示器",
+                "可镜像现有显示器，或通过仅在推流时启用的虚拟显示器将 Windows 桌面扩展到 iPad。",
                 300.0,
                 |ui| {
-                    refresh = widgets::icon_button(ui, super::icons::Icon::Refresh, "Refresh displays").clicked();
+                    refresh = widgets::icon_button(ui, super::icons::Icon::Refresh, "刷新显示器")
+                        .clicked();
                     self.display_picker(ui, 250.0);
                 },
             );
@@ -36,15 +37,15 @@ impl AnalyzerApp {
             let extending = self.settings_capture_display == CAPTURE_VIRTUAL_SENTINEL;
             widgets::setting_row(
                 ui,
-                "Match the iPad's resolution",
+                "匹配 iPad 分辨率",
                 if extending {
-                    "Sizes the extended display to the iPad's screen and refresh rate."
+                    "按照 iPad 的屏幕分辨率和刷新率设置扩展显示器。"
                 } else {
-                    "Used when extending. Sizes the virtual display to the iPad's screen."
+                    "扩展桌面时，将虚拟显示器调整为 iPad 的屏幕尺寸。"
                 },
                 64.0,
                 |ui| {
-                    widgets::toggle(ui, &mut vdd_match, "Match extended display to the iPad's resolution");
+                    widgets::toggle(ui, &mut vdd_match, "扩展显示器匹配 iPad 分辨率");
                 },
             );
             if vdd_match != self.settings_vdd_match {
@@ -54,14 +55,14 @@ impl AnalyzerApp {
         ui.add_space(GAP - 6.0);
 
         // ── Video quality ───────────────────────────────────────────────────
-        widgets::section_label(ui, "Video quality");
+        widgets::section_label(ui, "视频质量");
         widgets::list_card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             let mut fps = self.settings_fps_target;
             widgets::setting_row(
                 ui,
-                "Frame rate",
-                "The iPad can ask for less. Higher rates feel smoother and use more bandwidth.",
+                "帧率",
+                "iPad 可请求更低帧率。帧率越高越流畅，但会占用更多带宽。",
                 230.0,
                 |ui| {
                     widgets::segmented(ui, &mut fps, &[(30, "30"), (60, "60"), (90, "90"), (120, "120")]);
@@ -73,15 +74,15 @@ impl AnalyzerApp {
             let mut bitrate = self.settings_bitrate_mbps;
             widgets::setting_row(
                 ui,
-                "Maximum bitrate",
-                "The stream adapts below this ceiling when the network is busy.",
+                "最大码率",
+                "网络繁忙时，推流码率会在此上限以下自动调整。",
                 290.0,
                 |ui| {
                     ui.add_sized(
                         vec2(64.0, 24.0),
                         egui::Label::new(mono(format!("{bitrate:.0} Mbps"), 13.0)),
                     );
-                    widgets::slider(ui, &mut bitrate, 4.0..=50.0, 1.0, 210.0, "Maximum bitrate");
+                    widgets::slider(ui, &mut bitrate, 4.0..=50.0, 1.0, 210.0, "最大码率");
                 },
             );
             if bitrate != self.settings_bitrate_mbps {
@@ -92,11 +93,11 @@ impl AnalyzerApp {
             let mut hevc = self.settings_hevc_enabled;
             widgets::setting_row(
                 ui,
-                "Prefer HEVC (H.265)",
-                "Experimental. Sharper at the same bitrate when the iPad supports it. Falls back to H.264 on GPUs without an HEVC encoder.",
+                "优先使用 HEVC (H.265)",
+                "实验功能。在 iPad 支持时可用相同码率获得更清晰的画面；显卡不支持 HEVC 编码时会回退到 H.264。",
                 64.0,
                 |ui| {
-                    widgets::toggle(ui, &mut hevc, "Prefer HEVC (H.265) when the iPad supports it");
+                    widgets::toggle(ui, &mut hevc, "iPad 支持时优先使用 HEVC (H.265)");
                 },
             );
             if hevc != self.settings_hevc_enabled {
@@ -106,7 +107,7 @@ impl AnalyzerApp {
         ui.add_space(GAP - 6.0);
 
         // ── Audio ───────────────────────────────────────────────────────────
-        widgets::section_label(ui, "Audio");
+        widgets::section_label(ui, "音频");
         widgets::list_card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             let enabled = self
@@ -117,11 +118,11 @@ impl AnalyzerApp {
             let mut audio = enabled;
             widgets::setting_row(
                 ui,
-                "Stream PC audio",
-                "Plays this PC's sound on the iPad. Video keeps streaming if audio fails.",
+                "推流电脑音频",
+                "在 iPad 上播放此电脑的声音；音频失败时视频仍会继续推流。",
                 64.0,
                 |ui| {
-                    widgets::toggle(ui, &mut audio, "Stream PC audio");
+                    widgets::toggle(ui, &mut audio, "推流电脑音频");
                 },
             );
             if audio != enabled {
@@ -131,21 +132,21 @@ impl AnalyzerApp {
         ui.add_space(GAP - 6.0);
 
         // ── Network ─────────────────────────────────────────────────────────
-        widgets::section_label(ui, "Network");
+        widgets::section_label(ui, "网络");
         widgets::list_card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             let mut packet = self.settings_packet_size;
             widgets::setting_row(
                 ui,
-                "Packet size",
-                "Use 1200 when connecting over Tailscale or another VPN. 1400 suits most home networks.",
+                "数据包大小",
+                "通过 Tailscale 或其他 VPN 连接时使用 1200；大多数家庭网络适合 1400。",
                 150.0,
                 |ui| {
                     ui.add(
                         egui::DragValue::new(&mut packet)
                             .range(576..=1400)
                             .speed(4.0)
-                            .suffix(" bytes"),
+                            .suffix(" 字节"),
                     );
                 },
             );
@@ -156,15 +157,15 @@ impl AnalyzerApp {
         ui.add_space(GAP - 6.0);
 
         // ── Encoder ─────────────────────────────────────────────────────────
-        widgets::section_label(ui, "Encoder");
+        widgets::section_label(ui, "编码器");
         widgets::list_card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             let detected = super::friendly_codec(&snap.codec_name);
             let mut choice = self.settings_encoder_choice.clone();
             widgets::setting_row(
                 ui,
-                "Encoder",
-                &format!("Auto picks the best hardware encoder. In use now: {detected}."),
+                "编码器",
+                &format!("自动模式会选择最佳硬件编码器。当前使用：{detected}。"),
                 200.0,
                 |ui| {
                     widgets::combo("encoder-override", &choice_label(&choice), 190.0).show_ui(
@@ -190,15 +191,15 @@ impl AnalyzerApp {
             let mut input = self.settings_encoder_input;
             widgets::setting_row(
                 ui,
-                "Encoder input",
-                "Pixel format handed to the encoder. Applies after the stream restarts.",
+                "编码器输入",
+                "交给编码器的像素格式；重启推流后生效。",
                 230.0,
                 |ui| {
                     widgets::segmented(
                         ui,
                         &mut input,
                         &[
-                            (EncoderInput::Auto, "Auto"),
+                            (EncoderInput::Auto, "自动"),
                             (EncoderInput::Bgra, "BGRA"),
                             (EncoderInput::Yuv420, "YUV420"),
                         ],
@@ -212,18 +213,18 @@ impl AnalyzerApp {
         ui.add_space(GAP - 6.0);
 
         // ── Security ────────────────────────────────────────────────────────
-        widgets::section_label(ui, "Security");
+        widgets::section_label(ui, "安全");
         widgets::list_card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             let required = self.control.shared.pairing.lock().required;
             let mut require = required;
             widgets::setting_row(
                 ui,
-                "Require pairing",
-                "New iPads on Wi-Fi must enter the code shown on the Stream page. USB needs no code.",
+                "需要配对",
+                "新的 iPad 通过 Wi-Fi 连接时必须输入推流页面显示的配对码；USB 连接无需配对码。",
                 64.0,
                 |ui| {
-                    widgets::toggle(ui, &mut require, "Require pairing");
+                    widgets::toggle(ui, &mut require, "需要配对");
                 },
             );
             if require != required {
@@ -233,11 +234,11 @@ impl AnalyzerApp {
             let mut forget = false;
             widgets::setting_row(
                 ui,
-                "Forget all iPads",
-                "Creates a new pairing key. Every iPad has to pair again.",
+                "忘记所有 iPad",
+                "创建新的配对密钥，所有 iPad 都需要重新配对。",
                 170.0,
                 |ui| {
-                    forget = widgets::button(ui, Tone::Danger, None, "Forget all iPads").clicked();
+                    forget = widgets::button(ui, Tone::Danger, None, "忘记所有 iPad").clicked();
                 },
             );
             if forget {
@@ -251,18 +252,18 @@ impl AnalyzerApp {
         ui.add_space(GAP - 6.0);
 
         // ── General ─────────────────────────────────────────────────────────
-        widgets::section_label(ui, "General");
+        widgets::section_label(ui, "常规");
         widgets::list_card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             if cfg!(windows) {
                 let mut boot = self.settings_start_on_boot;
                 widgets::setting_row(
                     ui,
-                    "Start with Windows",
-                    "Opens EternalMonitor when you sign in, so your iPad can connect right away.",
+                    "随 Windows 启动",
+                    "登录 Windows 后静默启动 EternalMonitor，让 iPad 可以立即连接。",
                     64.0,
                     |ui| {
-                        widgets::toggle(ui, &mut boot, "Start on Windows startup");
+                        widgets::toggle(ui, &mut boot, "随 Windows 启动");
                     },
                 );
                 if boot != self.settings_start_on_boot {
@@ -273,11 +274,11 @@ impl AnalyzerApp {
             let mut updates = self.settings_check_updates;
             widgets::setting_row(
                 ui,
-                "Check for updates",
-                "Looks for a new release on GitHub once a day.",
+                "检查更新",
+                "每天从 GitHub 检查一次新版本。",
                 64.0,
                 |ui| {
-                    widgets::toggle(ui, &mut updates, "Check for updates daily");
+                    widgets::toggle(ui, &mut updates, "每天检查更新");
                 },
             );
             if updates != self.settings_check_updates {
@@ -287,7 +288,7 @@ impl AnalyzerApp {
         ui.add_space(GAP - 6.0);
 
         // ── About ───────────────────────────────────────────────────────────
-        widgets::section_label(ui, "About");
+        widgets::section_label(ui, "关于");
         widgets::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -305,7 +306,7 @@ impl AnalyzerApp {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     ui.label(heading("EternalMonitor"));
                     ui.label(muted(format!(
-                        "Version {} · Built by Ali Younes (@whoisaldo)",
+                        "版本 {} · Ali Younes (@whoisaldo) 开发",
                         env!("CARGO_PKG_VERSION")
                     )));
                 });
@@ -314,14 +315,14 @@ impl AnalyzerApp {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 18.0;
                 widgets::link(ui, "github.com/whoisaldo", "https://github.com/whoisaldo");
-                widgets::link(ui, "Source code", "https://github.com/sidebandstudio/EternalMonitor");
+                widgets::link(ui, "源代码", "https://github.com/sidebandstudio/EternalMonitor");
                 widgets::link(ui, "hello@sideband.studio", "mailto:hello@sideband.studio");
             });
             ui.add_space(6.0);
             ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
                 ui.add(
                     egui::Label::new(faint(
-                        "Set in Geist and Geist Mono by Vercel, used under the SIL Open Font License 1.1.",
+                        "界面使用 Vercel 的 Geist 与 Geist Mono 字体，遵循 SIL Open Font License 1.1。",
                     ))
                     .wrap(),
                 );
@@ -332,7 +333,7 @@ impl AnalyzerApp {
 
 fn choice_label(label: &str) -> String {
     match label {
-        "Auto" => "Automatic".into(),
+        "自动" => "自动选择".into(),
         "NVENC" => "NVIDIA NVENC".into(),
         "AMF" => "AMD AMF".into(),
         "QSV" => "Intel Quick Sync".into(),

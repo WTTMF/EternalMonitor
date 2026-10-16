@@ -225,7 +225,7 @@ fn run_encode_loop(
             });
 
         if encoder_state.is_none() {
-            match EncoderState::new(
+            match open_encoder_state(
                 &desired_encoder,
                 raw_frame.width,
                 raw_frame.height,
@@ -263,7 +263,7 @@ fn run_encode_loop(
                         stats.set_codec_name(&codec_display_name);
                         stats.set_software_fallback(true);
                     }
-                    encoder_state = Some(EncoderState::new(
+                    encoder_state = Some(open_encoder_state(
                         &encoder_name,
                         raw_frame.width,
                         raw_frame.height,
@@ -296,7 +296,7 @@ fn run_encode_loop(
                 .as_ref()
                 .map(|s| s.opened_bitrate)
                 .unwrap_or(0);
-            match EncoderState::new(
+            match open_encoder_state(
                 &desired_encoder,
                 raw_frame.width,
                 raw_frame.height,
@@ -355,6 +355,7 @@ fn run_encode_loop(
         let current_bitrate = encoder.opened_bitrate;
         let opened_is_hevc = is_hevc_encoder(&encoder.opened_encoder);
 
+        let conversion_start = Instant::now();
         #[cfg(target_os = "macos")]
         let src_row_bytes = (raw_frame.width * 4) as usize;
         #[cfg(target_os = "macos")]
@@ -389,6 +390,9 @@ fn run_encode_loop(
                 scaler.run(bgra, &mut encoder.frame)?;
             }
         }
+        PIPELINE_STATS
+            .lock()
+            .record_color_conversion(conversion_start.elapsed().as_micros());
         // Conversion finished synchronously. Recycle capture's buffer before
         // the codec or sender can block, including on the direct macOS path.
         drop(raw_frame.data);
@@ -610,6 +614,56 @@ struct EncoderState {
     legacy_pts: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncoderTuning {
+    Optimized,
+    Conservative,
+}
+
+fn open_encoder_state(
+    encoder_name: &str,
+    width: u32,
+    height: u32,
+    bitrate_bps: u32,
+    target_fps: u32,
+    input_mode: EncoderInput,
+) -> Result<EncoderState, Box<dyn std::error::Error + Send + Sync>> {
+    match EncoderState::new(
+        encoder_name,
+        width,
+        height,
+        bitrate_bps,
+        target_fps,
+        input_mode,
+        EncoderTuning::Optimized,
+    ) {
+        Ok(state) => Ok(state),
+        Err(optimized_error) if matches!(encoder_name, "h264_qsv" | "hevc_qsv") => {
+            warn!(
+                encoder = encoder_name,
+                error = %optimized_error,
+                "Optimized QSV options failed — retrying the same hardware encoder conservatively"
+            );
+            EncoderState::new(
+                encoder_name,
+                width,
+                height,
+                bitrate_bps,
+                target_fps,
+                input_mode,
+                EncoderTuning::Conservative,
+            )
+            .map_err(|conservative_error| {
+                format!(
+                    "{encoder_name} failed with optimized options ({optimized_error}) and conservative options ({conservative_error})"
+                )
+                .into()
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 impl EncoderState {
     fn update_bitrate_without_reopening(
         &mut self,
@@ -652,6 +706,7 @@ impl EncoderState {
         bitrate_bps: u32,
         target_fps: u32,
         input_mode: EncoderInput,
+        tuning: EncoderTuning,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let legacy_pts = std::env::var("ETERNAL_LEGACY_PTS").is_ok_and(|v| v.trim() == "1");
         let codec = ffmpeg_next::encoder::find_by_name(encoder_name)
@@ -697,7 +752,12 @@ impl EncoderState {
         encoder.set_gop(30);
         configure_encoder_flags(&mut encoder, encoder_name);
 
-        let opts = encoder_options(encoder_name);
+        let opts = match tuning {
+            EncoderTuning::Optimized => encoder_options(encoder_name),
+            EncoderTuning::Conservative => {
+                encoder_options_for(encoder_name, EncoderTuning::Conservative)
+            }
+        };
 
         let encoder = encoder.open_with(opts)?;
         log_encoder_configuration(encoder_name, &encoder);
@@ -851,6 +911,10 @@ fn note_encoder_opened(shared: &SharedControl, encoder_name: &str) {
 }
 
 fn encoder_options(encoder_name: &str) -> ffmpeg_next::Dictionary<'_> {
+    encoder_options_for(encoder_name, EncoderTuning::Optimized)
+}
+
+fn encoder_options_for(encoder_name: &str, tuning: EncoderTuning) -> ffmpeg_next::Dictionary<'_> {
     let mut opts = ffmpeg_next::Dictionary::new();
     match encoder_name {
         "h264_nvenc" => {
@@ -889,6 +953,11 @@ fn encoder_options(encoder_name: &str) -> ffmpeg_next::Dictionary<'_> {
             opts.set("preset", "veryfast");
             opts.set("profile", "baseline");
             opts.set("look_ahead", "0");
+            if tuning == EncoderTuning::Optimized {
+                opts.set("scenario", "displayremoting");
+                opts.set("async_depth", "2");
+                opts.set("low_delay_brc", "1");
+            }
         }
         "libx264" => {
             opts.set("preset", "ultrafast");
@@ -915,6 +984,11 @@ fn encoder_options(encoder_name: &str) -> ffmpeg_next::Dictionary<'_> {
         }
         "hevc_qsv" => {
             opts.set("preset", "veryfast");
+            if tuning == EncoderTuning::Optimized {
+                opts.set("scenario", "displayremoting");
+                opts.set("async_depth", "2");
+                opts.set("low_delay_brc", "1");
+            }
         }
         "hevc_videotoolbox" => {
             opts.set("realtime", "1");
@@ -1493,8 +1567,16 @@ mod tests {
     #[test]
     fn software_bitrate_changes_preserve_decoding_and_reduce_packet_size() {
         ffmpeg_next::init().unwrap();
-        let mut state =
-            EncoderState::new("libx264", 640, 360, 8_000_000, 60, EncoderInput::Yuv420).unwrap();
+        let mut state = EncoderState::new(
+            "libx264",
+            640,
+            360,
+            8_000_000,
+            60,
+            EncoderInput::Yuv420,
+            EncoderTuning::Optimized,
+        )
+        .unwrap();
         let context = unsafe { state.encoder.as_ptr() };
         let codec = ffmpeg_next::decoder::find(ffmpeg_next::codec::Id::H264).unwrap();
         let mut decoder = ffmpeg_next::codec::Context::new_with_codec(codec)
@@ -1649,6 +1731,28 @@ mod tests {
         ] {
             assert_eq!(hevc.get(key), Some(value), "hevc_amf {key}");
         }
+    }
+
+    #[test]
+    fn qsv_optimized_options_are_scoped_and_have_a_conservative_retry() {
+        for encoder in ["h264_qsv", "hevc_qsv"] {
+            let optimized = encoder_options_for(encoder, EncoderTuning::Optimized);
+            assert_eq!(optimized.get("preset"), Some("veryfast"));
+            assert_eq!(optimized.get("scenario"), Some("displayremoting"));
+            assert_eq!(optimized.get("async_depth"), Some("2"));
+            assert_eq!(optimized.get("low_delay_brc"), Some("1"));
+
+            let conservative = encoder_options_for(encoder, EncoderTuning::Conservative);
+            assert_eq!(conservative.get("preset"), Some("veryfast"));
+            assert_eq!(conservative.get("scenario"), None);
+            assert_eq!(conservative.get("async_depth"), None);
+            assert_eq!(conservative.get("low_delay_brc"), None);
+        }
+
+        let nvenc = encoder_options("h264_nvenc");
+        assert_eq!(nvenc.get("scenario"), None);
+        assert_eq!(nvenc.get("async_depth"), None);
+        assert_eq!(nvenc.get("low_delay_brc"), None);
     }
 
     #[test]

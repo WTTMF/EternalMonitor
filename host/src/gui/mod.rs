@@ -2,12 +2,12 @@
 //!
 //! Automation contract, shared with `scripts/win/Inspect-Host.ps1` and
 //! `tests/gui_snapshots.rs`. Keep these names when changing copy:
-//! - navigation buttons "Stream", "Performance" and "Settings";
-//! - the "QR code" button, which opens a dialog labelled "QR code";
-//! - on Stream, the "Pairing", "USB connection" and "PC audio" rows, and a
-//!   "Connected iPad" card that lists "Decode rate" and "Repaired fragments"
-//!   (or "Waiting for an iPad" when nobody is connected);
-//! - on Settings, the "Encoder input" row.
+//! - navigation buttons "推流", "性能" and "设置";
+//! - the "二维码" button, which opens a dialog labelled "二维码";
+//! - on 推流, the "配对", "USB 连接" and "电脑音频" rows, and a
+//!   "已连接的 iPad" card that lists "解码帧率" and "已修复分片"
+//!   (or "等待 iPad 连接" when nobody is connected);
+//! - on 设置, the "编码器输入" row.
 
 mod icons;
 mod page_performance;
@@ -49,9 +49,11 @@ struct StatsSnapshot {
     audio: crate::audio::AudioStats,
     capture_fps: f64,
     capture_frame_count: u64,
+    capture_readback_time_us: u128,
     capture_resolution: (u32, u32),
     encode_fps: f64,
     encode_time_us: u128,
+    color_conversion_time_us: u128,
     encode_frame_count: u64,
     nal_bytes_last: usize,
     bitrate_bps: u32,
@@ -74,6 +76,8 @@ struct StatsSnapshot {
     latency_ms: f64,
     bandwidth_mbps: f64,
     encode_time_history: Vec<f64>,
+    capture_readback_history: Vec<f64>,
+    color_conversion_history: Vec<f64>,
     pipeline_running: bool,
     uptime_secs: f64,
     mdns_active: bool,
@@ -87,9 +91,11 @@ impl StatsSnapshot {
             audio: s.audio.clone(),
             capture_fps: s.capture_fps,
             capture_frame_count: s.capture_frame_count,
+            capture_readback_time_us: s.capture_readback_time_us,
             capture_resolution: s.capture_resolution,
             encode_fps: s.encode_fps,
             encode_time_us: s.encode_time_us,
+            color_conversion_time_us: s.color_conversion_time_us,
             encode_frame_count: s.encode_frame_count,
             nal_bytes_last: s.nal_bytes_last,
             bitrate_bps: s.bitrate_bps,
@@ -112,6 +118,8 @@ impl StatsSnapshot {
             latency_ms: s.latency_ms,
             bandwidth_mbps: s.bandwidth_mbps,
             encode_time_history: s.encode_time_history.iter().copied().collect(),
+            capture_readback_history: s.capture_readback_history.iter().copied().collect(),
+            color_conversion_history: s.color_conversion_history.iter().copied().collect(),
             pipeline_running: s.pipeline_running,
             uptime_secs: s.uptime_secs(),
             mdns_active: s.mdns_active,
@@ -183,8 +191,8 @@ impl StreamState {
     }
 }
 
-const CAPTURE_AUTO_LABEL: &str = "Main display (mirror)";
-const CAPTURE_VIRTUAL_LABEL: &str = "Extended display (iPad)";
+const CAPTURE_AUTO_LABEL: &str = "主显示器（镜像）";
+const CAPTURE_VIRTUAL_LABEL: &str = "扩展显示器（iPad）";
 // The settings sentinel for the managed virtual display lives in control.rs
 // (shared with the startup preload).
 use crate::control::CAPTURE_VIRTUAL_SENTINEL;
@@ -192,11 +200,11 @@ use crate::control::CAPTURE_VIRTUAL_SENTINEL;
 /// Menu label for an enumerated output, e.g. `DISPLAY2 · 1920 × 1080 · primary`.
 fn format_output_label(o: &OutputInfo) -> String {
     let short = o.device_name.rsplit('\\').next().unwrap_or(&o.device_name);
-    let primary = if o.is_primary { " · primary" } else { "" };
+    let primary = if o.is_primary { " · 主显示器" } else { "" };
     format!("{} · {} × {}{}", short, o.width, o.height, primary)
 }
 
-const ENCODER_AUTO_LABEL: &str = "Auto";
+const ENCODER_AUTO_LABEL: &str = "自动";
 const ENCODER_CHOICES: &[(&str, &str)] = &[
     (ENCODER_AUTO_LABEL, ""),
     ("NVENC", "h264_nvenc"),
@@ -287,10 +295,15 @@ pub struct AnalyzerApp {
     copied: Option<(Copied, Instant)>,
     history: History,
     logo: Option<(f32, egui::TextureHandle)>,
+    background_start_pending: bool,
 }
 
 impl AnalyzerApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, control: GuiControl) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        control: GuiControl,
+        background_start: bool,
+    ) -> Self {
         theme::install(&cc.egui_ctx);
 
         // Load persisted settings first; values fall back to the live runtime state when the
@@ -407,6 +420,7 @@ impl AnalyzerApp {
             copied: None,
             history: History::new(),
             logo: None,
+            background_start_pending: background_start,
         }
     }
 
@@ -577,7 +591,7 @@ impl AnalyzerApp {
                 self.settings_error = None;
                 self.persist_settings();
             }
-            Err(error) => self.settings_error = Some(error),
+            Err(error) => self.settings_error = Some(format!("无法更新开机启动设置：{error}")),
         }
     }
 
@@ -597,7 +611,7 @@ impl AnalyzerApp {
     fn new_pairing_code(&mut self) {
         let result = self.control.shared.pairing.lock().rotate_code();
         if let Err(error) = result {
-            self.settings_error = Some(format!("Could not create a pairing code: {error}"));
+            self.settings_error = Some(format!("无法创建配对码：{error}"));
         }
     }
 
@@ -605,7 +619,7 @@ impl AnalyzerApp {
         let result = self.control.shared.pairing.lock().regenerate_token();
         match result {
             Ok(()) => self.persist_settings(),
-            Err(error) => self.settings_error = Some(format!("Could not reset pairing: {error}")),
+            Err(error) => self.settings_error = Some(format!("无法重置配对：{error}")),
         }
     }
 
@@ -638,6 +652,11 @@ impl eframe::App for AnalyzerApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if self.background_start_pending {
+            self.background_start_pending = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
         if let Some(dirty_at) = self.settings_dirty_at {
             if dirty_at.elapsed() >= Duration::from_millis(800) {
                 self.settings_dirty_at = None;
@@ -645,10 +664,15 @@ impl eframe::App for AnalyzerApp {
             }
         }
         // (A debounced write still pending at window close is flushed by on_exit.)
-        // Live numbers refresh five times a second. Input and animations
-        // repaint on their own, and a quieter window leaves the GPU to the
-        // encoder.
-        ctx.request_repaint_after(Duration::from_millis(200));
+        // Live numbers refresh five times a second while visible. A minimized
+        // autostart window only needs a slow heartbeat, leaving the GPU to the
+        // capture and encoder paths.
+        let minimized = ctx.input(|input| input.viewport().minimized.unwrap_or(false));
+        ctx.request_repaint_after(if minimized {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_millis(200)
+        });
 
         let snap = StatsSnapshot::take();
         let client = ClientSnapshot::take(&self.control);
@@ -715,10 +739,9 @@ impl AnalyzerApp {
                 self.draw_brand(ui);
                 ui.add_space(26.0);
                 ui.spacing_mut().item_spacing.y = 4.0;
-                let stream = self.nav_item(ui, Page::Stream, Icon::Display, "Stream");
-                let performance =
-                    self.nav_item(ui, Page::Performance, Icon::Activity, "Performance");
-                let settings = self.nav_item(ui, Page::Settings, Icon::Sliders, "Settings");
+                let stream = self.nav_item(ui, Page::Stream, Icon::Display, "推流");
+                let performance = self.nav_item(ui, Page::Performance, Icon::Activity, "性能");
+                let settings = self.nav_item(ui, Page::Settings, Icon::Sliders, "设置");
                 // A lime bar marks the open page and slides to the one clicked.
                 let active = match self.page {
                     Page::Stream => stream,
@@ -737,7 +760,7 @@ impl AnalyzerApp {
                 );
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    ui.label(faint(format!("Version {}", env!("CARGO_PKG_VERSION"))));
+                    ui.label(faint(format!("版本 {}", env!("CARGO_PKG_VERSION"))));
                     ui.add_space(6.0);
                     sidebar_status(ui, snap, client);
                 });
@@ -830,10 +853,10 @@ impl AnalyzerApp {
 fn sidebar_status(ui: &mut egui::Ui, snap: &StatsSnapshot, client: &ClientSnapshot) {
     let state = StreamState::of(snap, client);
     let (title, detail) = match state {
-        StreamState::Off => ("Stopped".to_string(), "Streaming is off".to_string()),
-        StreamState::Ready => ("Ready".to_string(), "Waiting for an iPad".to_string()),
+        StreamState::Off => ("已停止".to_string(), "推流已关闭".to_string()),
+        StreamState::Ready => ("就绪".to_string(), "等待 iPad 连接".to_string()),
         StreamState::Streaming => (
-            "Streaming".to_string(),
+            "正在推流".to_string(),
             format!(
                 "{} · {}",
                 client
@@ -973,16 +996,16 @@ impl AnalyzerApp {
                 ui.set_width(320.0);
                 ui.spacing_mut().item_spacing.y = 6.0;
                 ui.vertical_centered(|ui| {
-                    ui.label(overline("QR code"));
+                    ui.label(overline("二维码"));
                     ui.label(
-                        egui::RichText::new("Scan to connect")
+                        egui::RichText::new("扫码连接")
                             .family(semibold())
                             .size(20.0)
                             .color(TEXT),
                     );
                     ui.add(
                         egui::Label::new(muted(
-                            "On your iPad, open EternalMonitor, tap Scan QR and point it at this code.",
+                            "在 iPad 上打开 EternalMonitor，点击扫描二维码并对准此二维码。",
                         ))
                         .wrap(),
                     );
@@ -1015,7 +1038,7 @@ impl AnalyzerApp {
                             painter.text(
                                 rect.center(),
                                 egui::Align2::CENTER_CENTER,
-                                "The QR code could not be created",
+                                "无法生成二维码",
                                 egui::FontId::new(SMALL, egui::FontFamily::Proportional),
                                 DANGER,
                             );
@@ -1025,13 +1048,14 @@ impl AnalyzerApp {
                     ui.label(mono(listen_addr.clone(), 14.0));
                     ui.add(
                         egui::Label::new(faint(
-                            "The code carries this PC's pairing key. Only show it to iPads you trust.",
+                            "二维码包含此电脑的配对密钥，请仅向受信任的 iPad 展示。",
                         ))
                         .wrap(),
                     );
                     ui.add_space(14.0);
                     let width = ui.available_width();
-                    if widgets::button_ex(ui, Tone::Primary, None, "Done", true, width).clicked() {
+                    if widgets::button_ex(ui, Tone::Primary, None, "完成", true, width).clicked()
+                    {
                         close = true;
                     }
                 });
@@ -1060,16 +1084,16 @@ fn format_uptime(uptime_secs: f64) -> String {
     let total = uptime_secs.max(0.0) as u64;
     let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
     if h > 0 {
-        format!("{h}h {m:02}m")
+        format!("{h}小时 {m:02}分")
     } else {
-        format!("{m}m {s:02}s")
+        format!("{m}分 {s:02}秒")
     }
 }
 
 /// `h264_nvenc` → `H.264 · NVENC`, `libx264` → `H.264 · CPU`.
 fn friendly_codec(name: &str) -> String {
     if name.is_empty() {
-        return "Detecting encoder".into();
+        return "正在检测编码器".into();
     }
     let lower = name.to_ascii_lowercase();
     let codec = if lower.contains("hevc") || lower.contains("265") {
@@ -1095,7 +1119,7 @@ fn friendly_codec(name: &str) -> String {
 
 fn value_or_unknown(value: &str) -> &str {
     if value.is_empty() {
-        "Unknown"
+        "未知"
     } else {
         value
     }
@@ -1124,7 +1148,7 @@ pub fn detect_local_ip(listen_port: u16) -> String {
 }
 
 /// Launch the GUI window. Blocks the calling thread.
-pub fn run_gui(control: GuiControl) -> eframe::Result<()> {
+pub fn run_gui(control: GuiControl, background_start: bool) -> eframe::Result<()> {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon_256.png"))
         .expect("embedded icon PNG is valid");
 
@@ -1133,6 +1157,8 @@ pub fn run_gui(control: GuiControl) -> eframe::Result<()> {
             .with_title("EternalMonitor")
             .with_inner_size([1000.0, 640.0])
             .with_min_inner_size([820.0, 560.0])
+            .with_visible(!background_start)
+            .with_active(!background_start)
             .with_icon(std::sync::Arc::new(icon)),
         ..Default::default()
     };
@@ -1140,7 +1166,7 @@ pub fn run_gui(control: GuiControl) -> eframe::Result<()> {
     eframe::run_native(
         "EternalMonitor",
         options,
-        Box::new(|cc| Ok(Box::new(AnalyzerApp::new(cc, control)))),
+        Box::new(|cc| Ok(Box::new(AnalyzerApp::new(cc, control, background_start)))),
     )
 }
 

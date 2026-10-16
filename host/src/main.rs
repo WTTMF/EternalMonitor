@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::sync::mpsc;
 
 use eternal_host::control::{GuiControl, SharedControl};
@@ -9,17 +11,30 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let launch = LaunchOptions::parse(std::env::args().skip(1))?;
+    let headless = std::env::var("ETERNAL_HEADLESS").is_ok_and(|v| v.trim() == "1");
+    prepare_console(headless);
+
     // Anchor the process-wide media clock before anything else runs.
     clock::init();
 
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,mdns_sd=warn"));
-    let (stdout_writer, _stdout_guard) = logging::non_blocking_output(std::io::stdout());
     let (memory_writer, _session_guard) = logging::MemoryLogWriter::start();
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_target(false)
-        .with_writer(stdout_writer.with_max_level(tracing::Level::INFO))
-        .with_filter(logging::MdnsDedupFilter::new());
+    let (stdout_layer, _stdout_guard) = if has_console() {
+        let (stdout_writer, guard) = logging::non_blocking_output(std::io::stdout());
+        (
+            Some(
+                tracing_subscriber::fmt::layer()
+                    .with_target(false)
+                    .with_writer(stdout_writer.with_max_level(tracing::Level::INFO))
+                    .with_filter(logging::MdnsDedupFilter::new()),
+            ),
+            Some(guard),
+        )
+    } else {
+        (None, None)
+    };
     let memory_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_ansi(false)
@@ -54,10 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }));
     }
 
-    let listen_port: u16 = std::env::args()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(9876);
+    let listen_port = launch.listen_port;
 
     // Initialize FFmpeg early so encoder probing works during GPU detection
     if let Err(e) = ffmpeg_next::init() {
@@ -216,7 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a window): stream until SIGTERM/SIGINT, then fall through to the same
     // clean teardown as a GUI quit — mDNS goodbye, VDD disable, bounded
     // supervisor join. (Previously a kill skipped all of that.)
-    if std::env::var("ETERNAL_HEADLESS").is_ok_and(|v| v.trim() == "1") {
+    if headless {
         info!("ETERNAL_HEADLESS=1 — running without GUI until terminated");
         #[cfg(unix)]
         unsafe {
@@ -254,7 +266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         info!("Termination signal received — shutting down cleanly");
-    } else if let Err(e) = gui::run_gui(gui_control.clone()) {
+    } else if let Err(e) = gui::run_gui(gui_control.clone(), launch.background) {
         error!(error = %e, "GUI exited with error");
     }
 
@@ -293,4 +305,84 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("EternalMonitor shutting down");
     std::process::exit(0);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LaunchOptions {
+    listen_port: u16,
+    background: bool,
+}
+
+impl LaunchOptions {
+    fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
+        let mut listen_port = 9876;
+        let mut port_seen = false;
+        let mut background = false;
+        for arg in args {
+            match arg.as_str() {
+                "--background" => background = true,
+                _ if !arg.starts_with('-') && !port_seen => {
+                    listen_port = arg
+                        .parse()
+                        .map_err(|_| format!("Invalid listen port {arg:?}"))?;
+                    port_seen = true;
+                }
+                _ => return Err(format!("Unknown argument {arg:?}")),
+            }
+        }
+        Ok(Self {
+            listen_port,
+            background,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn prepare_console(headless: bool) {
+    if headless {
+        unsafe {
+            let _ = windows::Win32::System::Console::AttachConsole(
+                windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn prepare_console(_headless: bool) {}
+
+#[cfg(windows)]
+fn has_console() -> bool {
+    !unsafe { windows::Win32::System::Console::GetConsoleWindow() }
+        .0
+        .is_null()
+}
+
+#[cfg(not(windows))]
+fn has_console() -> bool {
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LaunchOptions;
+
+    #[test]
+    fn launch_options_preserve_port_and_add_background_mode() {
+        assert_eq!(
+            LaunchOptions::parse(Vec::<String>::new()).unwrap(),
+            LaunchOptions {
+                listen_port: 9876,
+                background: false,
+            }
+        );
+        assert_eq!(
+            LaunchOptions::parse(["--background".into(), "1234".into()]).unwrap(),
+            LaunchOptions {
+                listen_port: 1234,
+                background: true,
+            }
+        );
+        assert!(LaunchOptions::parse(["--unknown".into()]).is_err());
+    }
 }

@@ -353,10 +353,12 @@ pub fn run_capture_loop(
 
                 // --- Copy desktop texture to staging and read pixels into a
                 // recycled buffer (the readback is the ONLY full-frame copy) ---
+                let mut readback_us = None;
                 let frame_data: Option<Arc<Vec<u8>>> = if let Some(ref resource) = desktop_resource
                 {
                     match resource.cast::<ID3D11Texture2D>() {
                         Ok(desktop_texture) => {
+                            let readback_start = Instant::now();
                             unsafe {
                                 device_context.CopyResource(&staging_texture, &desktop_texture);
                             }
@@ -402,6 +404,7 @@ pub fn run_capture_loop(
                             unsafe {
                                 device_context.Unmap(&staging_texture, 0);
                             }
+                            readback_us = Some(readback_start.elapsed().as_micros());
 
                             // Composite the mouse cursor into the BGRA frame.
                             if cursor_visible && cursor.has_shape {
@@ -435,7 +438,9 @@ pub fn run_capture_loop(
 
                 if let Some(data) = frame_data {
                     // Record stats
-                    PIPELINE_STATS.lock().record_capture(tex_width, tex_height);
+                    PIPELINE_STATS
+                        .lock()
+                        .record_capture(tex_width, tex_height, readback_us);
                     heartbeat(&shared.hb_capture_frame_ms);
 
                     slot.publish(RawFrame {
@@ -469,7 +474,9 @@ pub fn run_capture_loop(
                 if client_connected(&shared) && last_send.elapsed() >= IDLE_KEEPALIVE {
                     frame_number += 1;
                     let now = Instant::now();
-                    PIPELINE_STATS.lock().record_capture(tex_width, tex_height);
+                    PIPELINE_STATS
+                        .lock()
+                        .record_capture(tex_width, tex_height, None);
                     heartbeat(&shared.hb_capture_frame_ms);
                     slot.publish(RawFrame {
                         frame_number,

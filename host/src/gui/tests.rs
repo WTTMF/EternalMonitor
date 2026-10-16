@@ -10,7 +10,7 @@ fn audio_row_reports_rate_and_keeps_failure_separate_from_video() {
     let (text, color) = audio_summary(&audio, true);
     assert!(text.contains("USB Audio Device"), "{text}");
     assert!(
-        text.contains("128 kbps") && text.contains("50 packets/s"),
+        text.contains("128 kbps") && text.contains("每秒 50 个包"),
         "{text}"
     );
     assert_eq!(color, ACCENT);
@@ -19,7 +19,7 @@ fn audio_row_reports_rate_and_keeps_failure_separate_from_video() {
     audio.error = Some("Output was removed".into());
     let (text, color) = audio_summary(&audio, true);
     assert!(
-        text.contains("Output was removed") && text.contains("Video continues"),
+        text.contains("Output was removed") && text.contains("视频会继续推流"),
         "{text}"
     );
     assert!(!text.contains("128 kbps"), "{text}");
@@ -27,10 +27,10 @@ fn audio_row_reports_rate_and_keeps_failure_separate_from_video() {
 
     audio.error = None;
     let (text, _) = audio_summary(&audio, false);
-    assert!(text.starts_with("Off."), "{text}");
+    assert!(text.starts_with("已关闭"), "{text}");
 
     let (text, color) = audio_summary(&crate::audio::AudioStats::default(), true);
-    assert_eq!(text, "Starts when an iPad connects.");
+    assert_eq!(text, "iPad 连接后开始。");
     assert_eq!(color, TEXT_MUTED);
 }
 
@@ -38,26 +38,24 @@ fn audio_row_reports_rate_and_keeps_failure_separate_from_video() {
 fn usb_row_shows_install_hint_only_when_the_service_is_unavailable() {
     let missing = usb_summary(false, 2, "Connected", 0, false);
     assert!(!missing.available);
-    assert_eq!(missing.badge, "Unavailable");
-    assert!(missing
-        .text
-        .contains("Install the Apple Devices app from the Microsoft Store to use USB"));
+    assert_eq!(missing.badge, "不可用");
+    assert!(missing.text.contains("Microsoft Store 安装 Apple Devices"));
 
     let connected = usb_summary(true, 1, "Connected", 0, false);
     assert!(connected.available);
-    assert_eq!(connected.badge, "Connected");
-    assert!(!connected.text.contains("Install"));
+    assert_eq!(connected.badge, "已连接");
+    assert!(!connected.text.contains("安装"));
 
     // "Waiting for an iPad" must never become a whole label: UI Automation
     // reads that exact name as "no iPad connected".
     let idle = usb_summary(true, 0, "Waiting for an iPad", 0, false);
-    assert_eq!(idle.badge, "Ready");
-    assert_ne!(idle.text, "Waiting for an iPad");
-    assert!(idle.text.contains("Plug in your iPad"), "{}", idle.text);
+    assert_eq!(idle.badge, "就绪");
+    assert_ne!(idle.text, "等待 iPad 连接");
+    assert!(idle.text.contains("连接 iPad"), "{}", idle.text);
 
     let app_closed = usb_summary(true, 1, "Waiting for the iPad app", 0, false);
     assert!(
-        app_closed.text.contains("Open EternalMonitor"),
+        app_closed.text.contains("打开 EternalMonitor"),
         "{}",
         app_closed.text
     );
@@ -65,7 +63,7 @@ fn usb_row_shows_install_hint_only_when_the_service_is_unavailable() {
     let unknown = usb_summary(true, 2, "Waiting for direct test listener", 0, false);
     assert_eq!(
         unknown.text,
-        "Waiting for direct test listener · 2 devices plugged in"
+        "Waiting for direct test listener · 已连接 2 台设备"
     );
 }
 
@@ -74,7 +72,7 @@ fn usb_row_says_to_open_or_install_apple_devices() {
     let closed = usb_summary(false, 0, "Apple device service unavailable", 0, true);
     assert!(!closed.available);
     assert!(
-        closed.text.starts_with("Open Apple Devices"),
+        closed.text.starts_with("请打开 Apple Devices"),
         "{}",
         closed.text
     );
@@ -83,15 +81,14 @@ fn usb_row_says_to_open_or_install_apple_devices() {
     assert!(
         plugged_closed
             .text
-            .contains("iPad plugged in. Open Apple Devices"),
+            .contains("iPad 已连接。请打开 Apple Devices"),
         "{}",
         plugged_closed.text
     );
 
     let plugged_missing = usb_summary(false, 0, "Apple device service unavailable", 1, false);
     assert!(
-        plugged_missing.text.contains("not installed")
-            && plugged_missing.text.contains("Microsoft Store"),
+        plugged_missing.text.contains("未安装") && plugged_missing.text.contains("Microsoft Store"),
         "{}",
         plugged_missing.text
     );
@@ -103,11 +100,11 @@ fn cable_notice_appears_only_for_a_plugged_in_ipad_without_the_service() {
     assert_eq!(usb_cable_notice(false, 0, false), None);
 
     let (title, body) = usb_cable_notice(false, 1, true).unwrap();
-    assert!(title.contains("Apple Devices is not running"), "{title}");
-    assert!(body.contains("leave it running"), "{body}");
+    assert!(title.contains("Apple Devices 未运行"), "{title}");
+    assert!(body.contains("保持其运行"), "{body}");
 
     let (title, body) = usb_cable_notice(false, 2, false).unwrap();
-    assert!(title.contains("Apple Devices is not installed"), "{title}");
+    assert!(title.contains("未安装 Apple Devices"), "{title}");
     assert!(body.contains("Microsoft Store"), "{body}");
 }
 
@@ -119,15 +116,15 @@ fn codec_names_read_as_codec_and_engine() {
     assert_eq!(friendly_codec("libx264"), "H.264 · CPU");
     assert_eq!(friendly_codec("libx265"), "HEVC · CPU");
     assert_eq!(friendly_codec("h264_videotoolbox"), "H.264 · VideoToolbox");
-    assert_eq!(friendly_codec(""), "Detecting encoder");
+    assert_eq!(friendly_codec(""), "正在检测编码器");
     assert_eq!(friendly_codec("mystery"), "mystery");
 }
 
 #[test]
 fn uptime_switches_to_hours_after_an_hour() {
-    assert_eq!(format_uptime(0.0), "0m 00s");
-    assert_eq!(format_uptime(75.4), "1m 15s");
-    assert_eq!(format_uptime(3.0 * 3600.0 + 125.0), "3h 02m");
+    assert_eq!(format_uptime(0.0), "0分 00秒");
+    assert_eq!(format_uptime(75.4), "1分 15秒");
+    assert_eq!(format_uptime(3.0 * 3600.0 + 125.0), "3小时 02分");
 }
 
 #[test]
