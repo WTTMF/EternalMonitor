@@ -2,7 +2,7 @@
 
 use std::sync::mpsc;
 
-use eternal_host::control::{GuiControl, SharedControl};
+use eternal_host::control::{GuiControl, SharedControl, VddStatus};
 use eternal_host::pipeline::DEFAULT_BITRATE_BPS;
 use eternal_host::{capture, clock, discovery, gpu, gui, logging, stats, vdd};
 use tracing::{error, info};
@@ -13,6 +13,12 @@ use tracing_subscriber::EnvFilter;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let launch = LaunchOptions::parse(std::env::args().skip(1))?;
     let headless = std::env::var("ETERNAL_HEADLESS").is_ok_and(|v| v.trim() == "1");
+    let Some(_instance_guard) = SingleInstanceGuard::acquire(launch.listen_port)? else {
+        if !launch.background && !headless {
+            show_existing_window();
+        }
+        return Ok(());
+    };
     prepare_console(headless);
 
     // Anchor the process-wide media clock before anything else runs.
@@ -56,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // force-killed while streaming the virtual extended display, the VDD device is still enabled
     // and shows up as a phantom monitor. Disabling it unconditionally at startup guarantees the
     // managed display only ever exists while EternalMonitor is actively using it.
-    vdd::disable();
+    let vdd_disabled_at_startup = vdd::disable();
 
     // Belt-and-suspenders: a panic anywhere (GUI, supervisor, pipeline threads) must still tear
     // the virtual display down before the process unwinds, so a crash can't strand a phantom
@@ -115,6 +121,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let shared = SharedControl::new(listen_port, initial_bitrate);
+    if !vdd_disabled_at_startup {
+        *shared.vdd_status.lock() = VddStatus::TaskFailed;
+    }
     {
         let mut pairing = shared.pairing.lock();
         pairing.configure(persisted.require_pairing, auth_token);
@@ -338,6 +347,62 @@ impl LaunchOptions {
 }
 
 #[cfg(windows)]
+struct SingleInstanceGuard(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl SingleInstanceGuard {
+    fn acquire(listen_port: u16) -> windows::core::Result<Option<Self>> {
+        use windows::core::HSTRING;
+        use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+        use windows::Win32::System::Threading::CreateMutexW;
+
+        let name = HSTRING::from(format!("Local\\EternalMonitor.Host.{listen_port}"));
+        let handle = unsafe { CreateMutexW(None, false, &name)? };
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe { CloseHandle(handle)? };
+            Ok(None)
+        } else {
+            Ok(Some(Self(handle)))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+#[cfg(not(windows))]
+struct SingleInstanceGuard;
+
+#[cfg(not(windows))]
+impl SingleInstanceGuard {
+    fn acquire(_listen_port: u16) -> Result<Option<Self>, std::convert::Infallible> {
+        Ok(Some(Self))
+    }
+}
+
+#[cfg(windows)]
+fn show_existing_window() {
+    use windows::core::w;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
+
+    if let Ok(window) = unsafe { FindWindowW(None, w!("EternalMonitor")) } {
+        unsafe {
+            let _ = ShowWindow(window, SW_RESTORE);
+            let _ = SetForegroundWindow(window);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn show_existing_window() {}
+
+#[cfg(windows)]
 fn prepare_console(headless: bool) {
     if headless {
         unsafe {
@@ -365,7 +430,7 @@ fn has_console() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::LaunchOptions;
+    use super::{LaunchOptions, SingleInstanceGuard};
 
     #[test]
     fn launch_options_preserve_port_and_add_background_mode() {
@@ -384,5 +449,15 @@ mod tests {
             }
         );
         assert!(LaunchOptions::parse(["--unknown".into()]).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn single_instance_guard_blocks_the_same_port_until_dropped() {
+        let port = 20_000 + (std::process::id() % 40_000) as u16;
+        let first = SingleInstanceGuard::acquire(port).unwrap().unwrap();
+        assert!(SingleInstanceGuard::acquire(port).unwrap().is_none());
+        drop(first);
+        assert!(SingleInstanceGuard::acquire(port).unwrap().is_some());
     }
 }

@@ -1,9 +1,11 @@
 # Registers the EternalMonitor virtual-display enable/disable scheduled tasks and leaves the
 # device DISABLED by default. Run elevated by the installer.
 #
-# The tasks run as SYSTEM with highest privileges, so the (non-elevated) EternalMonitor host
-# can flip the virtual display on/off via `schtasks /Run` without a UAC prompt. The task names
-# must match host/src/vdd.rs.
+# The tasks run through the logged-on Administrators group with highest privileges, so the
+# non-elevated EternalMonitor host can flip the virtual display without a UAC prompt. A group
+# principal is also allowed to start while Windows Battery Saver is active; ServiceAccount tasks
+# are queued by Windows in that state even when AllowStartIfOnBatteries is set. The task names must
+# match host/src/vdd.rs.
 #
 # Each task invokes vdd-toggle.ps1, which resolves the VDD device at TRIGGER time. We deliberately
 # do NOT bake a device instance id into the tasks here — baking a guessed id (the old
@@ -18,8 +20,9 @@ if (-not (Test-Path $toggle)) {
     exit 1
 }
 
-$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-$settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+$principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-544' -RunLevel Highest
+$settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
 
 function Register-VddTask([string]$Name, [string]$ToggleAction) {
     $argument = "-NoProfile -ExecutionPolicy Bypass -File `"$toggle`" -Action $ToggleAction"

@@ -84,16 +84,17 @@ Source: "{#StagingDir}\ffmpeg.exe";              DestDir: "{app}"; Flags: ignore
 Source: "{#StagingDir}\README.md";               DestDir: "{app}"; Flags: ignoreversion isreadme skipifsourcedoesntexist
 Source: "{#StagingDir}\LICENSE";                 DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#StagingDir}\QUICKSTART.txt";          DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-#ifdef IncludeDriver
-; Third-party Virtual Display Driver setup, bundled so the tester never touches GitHub.
-Source: "{#StagingDir}\driver\*"; DestDir: "{app}\driver"; Flags: ignoreversion recursesubdirs
 ; Scripts that register/remove the scheduled tasks the host uses to toggle the display, plus the
-; toggle script the tasks invoke (it resolves the VDD device at trigger time).
+; toggle script the tasks invoke. Keep these in app-only upgrades as well so an existing VDD can
+; be repaired without reinstalling the third-party driver package.
 Source: "scripts\vdd-tasks-setup.ps1";  DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "scripts\vdd-tasks-remove.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "scripts\vdd-driver-remove.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "scripts\vdd-driver-verify.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "scripts\vdd-toggle.ps1";       DestDir: "{app}\scripts"; Flags: ignoreversion
+#ifdef IncludeDriver
+; Third-party Virtual Display Driver setup, bundled so the tester never touches GitHub.
+Source: "{#StagingDir}\driver\*"; DestDir: "{app}\driver"; Flags: ignoreversion recursesubdirs
 #endif
 
 [Icons]
@@ -112,19 +113,20 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""E
 ; The vendor setup prompts to uninstall an existing installation even with silent
 ; switches. Preserve an existing driver and install only when it is absent.
 Filename: "{app}\driver\vdd-setup-x64.exe"; Parameters: "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"; StatusMsg: "{cm:DriverStatus}"; Flags: waituntilterminated; Check: NeedsVddInstall; AfterInstall: RecordVddOwnership
-; Register the enable/disable scheduled tasks and leave the virtual display OFF by default —
-; EternalMonitor turns it on only while streaming to it, so there's no phantom monitor.
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\vdd-tasks-setup.ps1"""; StatusMsg: "{cm:DisplayTaskStatus}"; Flags: runhidden waituntilterminated; Check: VddInstallSucceeded; AfterInstall: VerifyVddDriver
 #endif
+; Register high-privilege enable/disable tasks and leave the virtual display OFF by default —
+; EternalMonitor turns it on only while streaming to it, so there's no phantom monitor. This also
+; repairs task definitions during an app-only upgrade when the VDD package is already installed.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\vdd-tasks-setup.ps1"""; StatusMsg: "{cm:DisplayTaskStatus}"; Flags: runhidden waituntilterminated; Check: ShouldConfigureVdd; AfterInstall: VerifyVddDriver
 ; Launch the app at the end.
 Filename: "{app}\EternalMonitor-host.exe"; Description: "{cm:LaunchNow}"; Flags: nowait postinstall skipifsilent; Check: VddInstallSucceeded
 
 [UninstallRun]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""EternalMonitor Host UDP"""; Flags: runhidden waituntilterminated; RunOnceId: "EternalMonitorFirewallUDP"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""EternalMonitor Host TCP"""; Flags: runhidden waituntilterminated; RunOnceId: "EternalMonitorFirewallTCP"
-#ifdef IncludeDriver
 ; Remove the scheduled tasks and disable the device before removing an owned driver.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\vdd-tasks-remove.ps1"""; Flags: runhidden; RunOnceId: "VddTasksRemove"
+#ifdef IncludeDriver
 ; Always record this entry to supersede older VddUninstall commands on upgrade.
 ; A Check that returns false at install time leaves the old command in place.
 ; The helper checks ownership when the uninstaller actually runs.
@@ -152,7 +154,6 @@ begin
     Result := 1;
 end;
 
-#ifdef IncludeDriver
 const
   VddRegistryKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\VirtualDisplayDriver_is1';
 
@@ -169,13 +170,11 @@ begin
   Result := Result and (Directory <> '') and (Version <> '');
 end;
 
-function NeedsVddInstall: Boolean;
+function ShouldConfigureVdd: Boolean;
 var
   Directory, Version: String;
 begin
-  Result := not ReadVddRegistration(Directory, Version);
-  if not Result then
-    Log('Preserving existing Virtual Display Driver package ' + Version);
+  Result := VddInstallSucceeded and ReadVddRegistration(Directory, Version);
 end;
 
 procedure VerifyVddDriver;
@@ -190,6 +189,17 @@ begin
     VddInstallFailed := True;
     RaiseException('Windows did not finish installing the virtual display driver. Run setup while signed into Windows and approve its publisher prompt. If the driver already exists, repair it before trying again.');
   end;
+end;
+
+#ifdef IncludeDriver
+
+function NeedsVddInstall: Boolean;
+var
+  Directory, Version: String;
+begin
+  Result := not ReadVddRegistration(Directory, Version);
+  if not Result then
+    Log('Preserving existing Virtual Display Driver package ' + Version);
 end;
 
 procedure RecordVddOwnership;

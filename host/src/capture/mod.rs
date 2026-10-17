@@ -269,11 +269,19 @@ pub(crate) fn reconcile_virtual_display(
     generation: u64,
 ) -> Option<CaptureTarget> {
     // A previous capture thread may still be leaving its attach poll when the
-    // supervisor starts the next generation. Only one may trigger driver tasks.
-    let _lifecycle = shared.vdd_lifecycle.lock();
-    if !capture_is_current(shared, generation) {
-        return None;
-    }
+    // supervisor starts the next generation. Only one may trigger driver tasks. Keep the
+    // current generation's startup heartbeat alive while waiting: an old generation can still
+    // be inside a bounded PnP operation, and a blocking lock() here otherwise trips the 3s
+    // capture watchdog and creates a restart storm before that operation can finish.
+    let _lifecycle = loop {
+        if !capture_is_current(shared, generation) {
+            return None;
+        }
+        startup_heartbeat(shared, crate::clock::host_now_us() / 1000);
+        if let Some(guard) = shared.vdd_lifecycle.try_lock_for(Duration::from_millis(50)) {
+            break guard;
+        }
+    };
     let progress = || {
         if capture_is_current(shared, generation) {
             startup_heartbeat(shared, crate::clock::host_now_us() / 1000);
@@ -284,22 +292,26 @@ pub(crate) fn reconcile_virtual_display(
             // Defer enabling the VDD until an iPad actually connects. The transport restarts the
             // pipeline on the first receiver registration, so this runs again with a connected
             // client at that point and the display comes up then — never while the PC sits idle.
-            let waiting_for_client = {
+            let (waiting_for_client, needs_disable) = {
                 let session = shared.session.lock();
                 let waiting = !session.is_active();
-                *shared.vdd_status.lock() = if waiting {
+                let mut status = shared.vdd_status.lock();
+                let needs_disable = waiting && vdd_needs_idle_disable(*status);
+                *status = if waiting {
                     VddStatus::WaitingForClient
                 } else {
                     VddStatus::Attaching
                 };
-                waiting
+                (waiting, needs_disable)
             };
             if waiting_for_client {
                 info!(
                     "Extended display selected but no iPad has connected yet — leaving the \
                      virtual display off and mirroring the primary display until a client registers"
                 );
-                crate::vdd::set_enabled(false, progress);
+                if needs_disable {
+                    crate::vdd::set_enabled(false, progress);
+                }
                 *shared.vdd_output.lock() = None;
                 return capture_is_current(shared, generation)
                     .then_some(CaptureTarget::PrimaryAuto);
@@ -358,6 +370,18 @@ pub(crate) fn reconcile_virtual_display(
                 *shared.vdd_status.lock() = VddStatus::TaskFailed;
                 return Some(CaptureTarget::PrimaryAuto);
             }
+            if !capture_is_current(shared, generation) {
+                // The iPad can reconnect while a slow PnP enable is still completing. Its
+                // liveness transition starts a new pipeline generation, but this generation
+                // still owns the serialized driver operation. Hand the newly-attached output
+                // name to the successor so it can reuse the display instead of enabling it
+                // again and then waiting for an output that is no longer "new".
+                let outputs = enumerate_outputs();
+                if let Some(chosen) = pick_new_virtual_output(&before, &outputs) {
+                    *shared.vdd_output.lock() = Some(chosen.device_name.clone());
+                }
+                return None;
+            }
             let result = wait_for_virtual_output(
                 &before,
                 vdd_attach_timeout(),
@@ -404,6 +428,11 @@ pub(crate) fn reconcile_virtual_display(
             Some(other.clone())
         }
     }
+}
+
+#[cfg(any(windows, test))]
+fn vdd_needs_idle_disable(status: VddStatus) -> bool {
+    !matches!(status, VddStatus::Inactive | VddStatus::WaitingForClient)
 }
 
 /// Runs the platform capture loop on the CURRENT thread until stop/close,
@@ -524,6 +553,16 @@ mod tests {
             .contains("capture loop silent"),
             "the normal watchdog must still detect a stalled driver"
         );
+    }
+
+    #[test]
+    fn idle_virtual_display_skips_only_redundant_disable() {
+        assert!(!vdd_needs_idle_disable(VddStatus::Inactive));
+        assert!(!vdd_needs_idle_disable(VddStatus::WaitingForClient));
+        assert!(vdd_needs_idle_disable(VddStatus::Attaching));
+        assert!(vdd_needs_idle_disable(VddStatus::Active));
+        assert!(vdd_needs_idle_disable(VddStatus::Failed));
+        assert!(vdd_needs_idle_disable(VddStatus::TaskFailed));
     }
 
     #[test]

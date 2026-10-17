@@ -4,7 +4,9 @@ try {
     $service = New-Object -ComObject Schedule.Service
     $service.Connect()
     $registered = $service.GetFolder('\').GetTask($Task)
-    $deadline = (Get-Date).AddSeconds(15)
+    # Enable-PnpDevice takes about 17 seconds on some Intel laptop systems. Keep this
+    # bounded, but allow the synchronous driver transition to complete before judging it stuck.
+    $deadline = (Get-Date).AddSeconds(30)
     # Finish any prior invocation before requesting another one. The host
     # serializes both directions so a late disable cannot undo an enable.
     while ($registered.State -in @(2,4)) {
@@ -27,7 +29,17 @@ try {
         if ($running.State -notin @(2,4)) { break }
         Start-Sleep -Milliseconds 50
     }
-    $registered = $service.GetFolder('\').GetTask($Task)
+    # The running-instance state can reach Ready just before the registered task publishes its
+    # final action result. During that short window LastTaskResult is SCHED_S_TASK_RUNNING
+    # (0x00041301), not a failure. Wait for both views to settle before evaluating the result.
+    while ($true) {
+        if ((Get-Date) -gt $deadline) { throw "VDD task result timed out: $Task" }
+        $registered = $service.GetFolder('\').GetTask($Task)
+        if ($registered.State -notin @(2,4) -and $registered.LastTaskResult -ne 0x00041301) {
+            break
+        }
+        Start-Sleep -Milliseconds 50
+    }
     if ($registered.LastTaskResult -ne 0) {
         throw "VDD task failed: $Task, result=$($registered.LastTaskResult)"
     }

@@ -65,6 +65,7 @@ const BACKOFF_BASE: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 const STORM_WINDOW: Duration = Duration::from_secs(60);
 const STORM_LIMIT: usize = 6;
+const ENCODER_WATCHDOG_MS: u64 = 8_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisorState {
@@ -403,11 +404,13 @@ pub(crate) fn wedge_reason_at(
         ));
     }
 
-    // Frames flow but nothing comes out of the encoder: encoder wedged.
+    // Frames flow but nothing comes out of the encoder: encoder wedged. Give
+    // hardware codecs enough time for their first driver-backed open; QSV can
+    // legitimately take more than 3s at high resolutions.
     if frame_ms > 0
         && encode_ms > 0
-        && frame_ms.saturating_sub(encode_ms) > 3_000
-        && now_ms.saturating_sub(encode_ms) > 3_000
+        && frame_ms.saturating_sub(encode_ms) > ENCODER_WATCHDOG_MS
+        && now_ms.saturating_sub(encode_ms) > ENCODER_WATCHDOG_MS
     {
         return Some(format!(
             "encoder silent for {}ms while capture advances",
@@ -670,6 +673,23 @@ mod tests {
         let effect = machine.on_wedged("no frames for 5s", Instant::now());
         assert_eq!(effect, Effect::StopPipeline);
         assert!(matches!(machine.state, SupervisorState::BackingOff { .. }));
+    }
+
+    #[test]
+    fn slow_hardware_encoder_open_does_not_trip_watchdog() {
+        let shared = SharedControl::new(9876, 15_000_000);
+        let machine = Machine::new(1);
+        shared.hb_capture_loop_ms.store(5_000, Ordering::Relaxed);
+        shared.hb_capture_frame_ms.store(5_000, Ordering::Relaxed);
+        shared.hb_encode_frame_ms.store(1_000, Ordering::Relaxed);
+
+        assert!(wedge_reason_at(&shared, &machine, 5_000).is_none());
+
+        shared.hb_capture_loop_ms.store(9_001, Ordering::Relaxed);
+        shared.hb_capture_frame_ms.store(9_001, Ordering::Relaxed);
+        assert!(wedge_reason_at(&shared, &machine, 9_001)
+            .unwrap()
+            .contains("encoder silent"));
     }
 
     #[test]

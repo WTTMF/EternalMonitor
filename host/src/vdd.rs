@@ -6,7 +6,8 @@
 //! Enabling/disabling a driver device requires admin, so the installer registers two
 //! "run with highest privileges" scheduled tasks (one per direction). Triggering an
 //! already-elevated, pre-authorized task does not raise a UAC prompt, so the non-elevated
-//! host can flip the virtual display on and off seamlessly.
+//! host can flip the virtual display on and off seamlessly. The installer uses an interactive
+//! Administrators-group principal because Windows Battery Saver queues ServiceAccount tasks.
 
 #[cfg(windows)]
 use std::process::{Command, Stdio};
@@ -55,7 +56,9 @@ fn run_task(task: &str, mut progress: impl FnMut()) -> bool {
             return false;
         }
     };
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // The PowerShell helper gives the PnP transition 30 seconds. Keep a small outer margin so
+    // we collect its diagnostic output instead of killing it just before its own deadline.
+    let deadline = Instant::now() + Duration::from_secs(35);
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -108,6 +111,6 @@ pub(crate) fn set_enabled(enabled: bool, progress: impl FnMut()) -> bool {
 }
 
 /// Disable the virtual display device (best effort — failures are non-fatal).
-pub fn disable() {
-    set_enabled(false, || {});
+pub fn disable() -> bool {
+    set_enabled(false, || {})
 }
