@@ -92,6 +92,7 @@ Source: "scripts\vdd-tasks-remove.ps1"; DestDir: "{app}\scripts"; Flags: ignorev
 Source: "scripts\vdd-driver-remove.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "scripts\vdd-driver-verify.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "scripts\vdd-toggle.ps1";       DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "scripts\vdd-task-hidden.vbs";  DestDir: "{app}\scripts"; Flags: ignoreversion
 #ifdef IncludeDriver
 ; Third-party Virtual Display Driver setup, bundled so the tester never touches GitHub.
 Source: "{#StagingDir}\driver\*"; DestDir: "{app}\driver"; Flags: ignoreversion recursesubdirs
