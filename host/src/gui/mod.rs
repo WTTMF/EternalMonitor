@@ -14,6 +14,8 @@ mod page_performance;
 mod page_settings;
 mod page_stream;
 mod theme;
+#[cfg(windows)]
+mod tray;
 mod widgets;
 
 use std::collections::VecDeque;
@@ -296,6 +298,8 @@ pub struct AnalyzerApp {
     history: History,
     logo: Option<(f32, egui::TextureHandle)>,
     background_start_pending: bool,
+    #[cfg(windows)]
+    tray: Option<tray::SystemTray>,
 }
 
 impl AnalyzerApp {
@@ -396,6 +400,22 @@ impl AnalyzerApp {
             crate::updates::start(available_update.clone());
         }
         let encoder_input = *control.shared.encoder_input.lock();
+        #[cfg(windows)]
+        let tray = match tray::SystemTray::new(&cc.egui_ctx) {
+            Ok(tray) => Some(tray),
+            Err(error) => {
+                warn!(%error, "Could not create system tray; keeping the window accessible");
+                None
+            }
+        };
+        #[cfg(windows)]
+        if background_start && tray.is_some() {
+            if let Some(window) = cc.winit_window() {
+                // Skip eframe's first paint, which would otherwise show the window.
+                window.set_minimized(true);
+                window.set_visible(false);
+            }
+        }
         Self {
             settings_encoder_input: encoder_input,
             settings_check_updates: persisted.check_for_updates,
@@ -421,6 +441,8 @@ impl AnalyzerApp {
             history: History::new(),
             logo: None,
             background_start_pending: background_start,
+            #[cfg(windows)]
+            tray,
         }
     }
 
@@ -640,6 +662,38 @@ impl AnalyzerApp {
 }
 
 impl eframe::App for AnalyzerApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.background_start_pending {
+            self.background_start_pending = false;
+            #[cfg(windows)]
+            if self.tray.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else {
+                tray::open_window(ctx);
+            }
+            #[cfg(not(windows))]
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
+        }
+        #[cfg(windows)]
+        if let Some(tray) = &self.tray {
+            tray.handle_close(ctx);
+        }
+        // A pending settings write must complete even after closing to the tray.
+        if let Some(dirty_at) = self.settings_dirty_at {
+            let remaining = Duration::from_millis(800).saturating_sub(dirty_at.elapsed());
+            if remaining.is_zero() {
+                self.settings_dirty_at = None;
+                self.persist_settings();
+            } else {
+                ctx.request_repaint_after(remaining);
+            }
+        }
+    }
+
     fn on_exit(&mut self) {
         if self.settings_dirty_at.take().is_some() {
             self.persist_settings();
@@ -652,17 +706,6 @@ impl eframe::App for AnalyzerApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if self.background_start_pending {
-            self.background_start_pending = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        }
-        if let Some(dirty_at) = self.settings_dirty_at {
-            if dirty_at.elapsed() >= Duration::from_millis(800) {
-                self.settings_dirty_at = None;
-                self.persist_settings();
-            }
-        }
         // (A debounced write still pending at window close is flushed by on_exit.)
         // Live numbers refresh five times a second while visible. A minimized
         // autostart window only needs a slow heartbeat, leaving the GPU to the

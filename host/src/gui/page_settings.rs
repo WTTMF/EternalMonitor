@@ -260,7 +260,7 @@ impl AnalyzerApp {
                 widgets::setting_row(
                     ui,
                     "随 Windows 启动",
-                    "登录 Windows 后静默启动 EternalMonitor，让 iPad 可以立即连接。",
+                    "登录 Windows 后静默驻留系统托盘；关闭窗口仍继续运行，右键托盘图标可退出。",
                     64.0,
                     |ui| {
                         widgets::toggle(ui, &mut boot, "随 Windows 启动");

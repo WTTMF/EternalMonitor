@@ -98,6 +98,15 @@ fallback banner means the hardware encoder did not open; collect its error,
 update the GPU driver and restart. Keep the default YUV420 input unless
 explicitly testing the BGRA option.
 
+7. Start silently with Windows
+------------------------------
+In Settings, enable "随 Windows 启动". At your next Windows sign-in,
+EternalMonitor starts in the system tray without a main window or console.
+Double-click its tray icon to open the window, or use the right-click menu.
+Closing the window keeps streaming in the tray. To stop the app and release
+the virtual display, right-click the tray icon and choose "退出 EternalMonitor".
+Windows may place the icon in the hidden-icons area beside the clock.
+
 Connection troubleshooting
 --------------------------
 - Try the host's LAN IP instead of discovery; keep its window open.
